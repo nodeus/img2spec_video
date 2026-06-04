@@ -1,0 +1,58 @@
+# Changelog
+
+## 5.0 — Video Mode & CLI Optimization
+
+### Major Features
+
+- **Video Mode** — load, scrub, and export video files (MP4, MOV, AVI, etc. supported by ffmpeg)
+  - Timeline slider with frame-by-frame navigation
+  - Play/pause with forward/backward skip buttons
+  - Real-time preview of all modifiers applied to video frames
+  - Export to HEVC (NVENC/AMF) or H.264 (x264) with configurable quality and scale
+  - Audio remux from source video after export
+  - Default export filename: `<input>_spmz.mp4`
+
+- **`--pipe` Mode** — process frames via stdin/stdout pipeline
+  - `img2spec workspace.isw --pipe --width W --height H`
+  - Reads raw RGB24 frames from stdin, outputs processed RGBA frames to stdout
+  - Supports ScalePosModifier (full-resolution source preserved)
+  - Frame-accurate pipeline for integration with external tools
+
+- **`--batch-stdin` Mode** — batch process multiple images with different workspaces
+  - Reads JSON lines from stdin: `{"src":"input.png","workspace":"file.isw","dst":"output.png"}`
+  - Each line is a self-contained export job
+  - Avoids Windows 32K-char command-line limit via streaming input
+
+- **Headless CLI Mode** — `--headless` flag suppresses all GUI output
+  - Combined with `--batch-stdin` for fully automated batch processing
+  - Can run on machines without a display
+
+### Improvements
+
+- CLI arguments processed sequentially and independently
+- `process_and_save()` helper reduces code duplication
+- Export respects all modifiers (Scale/Position, etc.)
+- Cleaner build with MSVC 19.44 (VS 2022 BuildTools)
+- `imgui.ini` removed from version control
+
+### Bug Fixes
+
+- Color byte order (R↔B swap) in `get_video_frame()` and `pipe_loop()`
+- `ScalePosModifier::process()` now correctly uses `gSourceImageData`
+- Infinite file dialog loops in video mode (`gOptTrackFile`/`gDirtyPic` guards)
+- Export pipeline: `STARTF_USESTDHANDLES` without handle assignment no longer kills stdin
+- `CREATE_NO_WINDOW` vs `DETACHED_PROCESS` selection for background export
+- Binary mode (`_setmode`) for stdin/stdout in pipe mode
+- Output ffmpeg now uses `-i -` to read from stdin, `-r` for framerate, `-vf scale` for scaling
+- Fixed `main10` profile mismatch (changed to `main` for 8-bit yuv420p)
+
+---
+
+## 4.0 — Previous Release
+
+Original release by Jari Komppa. Image-to-spectrum conversion GUI tool with:
+- ZX Spectrum, ZX 3x64, C64 HiRes, C64 Multicolor device modes
+- Stackable modifiers (quantize, dither, scale, position, etc.)
+- PNG/SCR/H/INC export
+- Real-time interactive preview
+- Workspace save/load
