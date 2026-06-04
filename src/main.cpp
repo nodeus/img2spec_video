@@ -925,7 +925,25 @@ void get_video_frame(int frameNum)
 		return;
 	}
 
-	// Copy frame into device buffer (centered, clipped — same as loadimg)
+	// Store original frame as RGBA in gSourceImageData (for ScalePosModifier)
+	if (gSourceImageData)
+		stbi_image_free(gSourceImageData);
+	gSourceImageData = (unsigned int *)malloc(vw * vh * 4);
+	gSourceImageX = vw;
+	gSourceImageY = vh;
+
+	if (gSourceImageData)
+	{
+		for (int i = 0; i < vw * vh; i++)
+		{
+			int r = buf[i * 3 + 0];
+			int g = buf[i * 3 + 1];
+			int b = buf[i * 3 + 2];
+			gSourceImageData[i] = r | (g << 8) | (b << 16) | 0xff000000;
+		}
+	}
+
+	// Copy into device buffer (centered, clipped — triggers modifiers + filter)
 	for (int y = 0; y < gDevice->mYRes; y++)
 	{
 		for (int x = 0; x < gDevice->mXRes; x++)
@@ -945,7 +963,7 @@ void get_video_frame(int frameNum)
 	delete[] buf;
 	gVideoCurrentFrame = frameNum;
 	gDirty = 1;
-	gDirtyPic = 0;
+	gDirtyPic = 1; // triggers ScalePosModifier to re-scale from gSourceImageData
 }
 
 void load_video(const char *filename)
