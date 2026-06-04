@@ -1078,25 +1078,28 @@ void start_video_export()
 	json_serialize_to_file_pretty(root_value, workspacePath);
 	json_value_free(root_value);
 
+	int outW = gDevice->mXRes * gOptExportScale;
+	int outH = gDevice->mYRes * gOptExportScale;
 	char cmd[16384];
 	sprintf(cmd,
 		"ffmpeg -loglevel error -i \"%s\" "
 		"-f rawvideo -pix_fmt rgb24 - | "
 		"\"%s\" \"%s\" --pipe --width %d --height %d | "
-		"ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d ",
+		"ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d -r %d -i - "
+		"-vf scale=%d:%d ",
 		gVideoFilename,
 		exePath, workspacePath,
 		gVideoWidth, gVideoHeight,
 		gDevice->mXRes, gDevice->mYRes,
-		gVideoFps,
-		gOptExportScale, gOptExportScale);
+		(int)gVideoFps,
+		outW, outH);
 
 	// Encoder-specific args
 	switch (gOptExportEncoder)
 	{
 	case 0: // NVIDIA NVENC
 		sprintf(cmd + strlen(cmd),
-			"-c:v hevc_nvenc -profile:v main10 -pix_fmt yuv420p "
+			"-c:v hevc_nvenc -profile:v main -pix_fmt yuv420p "
 			"-preset fast -rc constqp -qp %d -init_qpB 2 \"%s\"",
 			gOptExportQuality, gOptExportFilename);
 		break;
