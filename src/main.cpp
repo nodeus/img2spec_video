@@ -977,34 +977,86 @@ void load_video(const char *filename)
 	get_video_frame(0);
 }
 
+int pipe_mode = 0;
+
+void pipe_loop()
+{
+	int w = gDevice->mXRes;
+	int h = gDevice->mYRes;
+	int pixels = w * h;
+
+	unsigned char *buf = new unsigned char[pixels * 3];
+	while (fread(buf, 1, pixels * 3, stdin) == (size_t)(pixels * 3))
+	{
+		for (int i = 0; i < pixels; i++)
+		{
+			int r = buf[i * 3 + 0];
+			int g = buf[i * 3 + 1];
+			int b = buf[i * 3 + 2];
+			gBitmapOrig[i] = 0xff000000 | (r << 16) | (g << 8) | b;
+		}
+
+		process_image();
+		gDevice->filter();
+
+		for (int i = 0; i < pixels; i++)
+		{
+			unsigned int c = gBitmapSpec[i];
+			unsigned char rgba[4] = {
+				(unsigned char)((c >> 16) & 0xff),
+				(unsigned char)((c >> 8) & 0xff),
+				(unsigned char)(c & 0xff),
+				0xff };
+			fwrite(rgba, 1, 4, stdout);
+		}
+		fflush(stdout);
+	}
+	delete[] buf;
+}
+
 int main(int aParamc, char**aParams)
 {
 	SDL_SysWMinfo wminfo;
 
 	gDevice = new ZXSpectrumDevice;
-	// Setup SDL
-	if (SDL_Init(SDL_INIT_EVERYTHING) != 0)
+
+	// Pre-scan: detect --pipe mode
+	pipe_mode = 0;
+	for (int i = 1; i < aParamc; i++)
 	{
-        printf("Error: %s\n", SDL_GetError());
-        return -1;
+		if (strcmp(aParams[i], "--pipe") == 0)
+			pipe_mode = 1;
 	}
 
-    // Setup window
-	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
-	SDL_DisplayMode current;
-	SDL_GetCurrentDisplayMode(0, &current);
-	SDL_Window *window = SDL_CreateWindow("Image Spectrumizer " VERSION " - http://iki.fi/sol", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
-	SDL_GLContext glcontext = SDL_GL_CreateContext(window);
-	SDL_VERSION(&wminfo.version);
-	SDL_GetWindowWMInfo(window, &wminfo);
-    // Setup ImGui binding
-    ImGui_ImplSdl_Init(window);
+	SDL_Window *window = 0;
+	SDL_GLContext glcontext = 0;
+	ImVec4 clear_color(0, 0, 0, 0);
 
-    ImVec4 clear_color = ImColor(114, 144, 154);
+	if (!pipe_mode)
+	{
+		clear_color = ImColor(114, 144, 154);
+
+		// Setup SDL
+		if (SDL_Init(SDL_INIT_EVERYTHING) != 0)
+		{
+			printf("Error: %s\n", SDL_GetError());
+			return -1;
+		}
+
+		// Setup window
+		SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+		SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+		SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+		SDL_DisplayMode current;
+		SDL_GetCurrentDisplayMode(0, &current);
+		window = SDL_CreateWindow("Image Spectrumizer " VERSION " - http://iki.fi/sol", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
+		glcontext = SDL_GL_CreateContext(window);
+		SDL_VERSION(&wminfo.version);
+		SDL_GetWindowWMInfo(window, &wminfo);
+		// Setup ImGui binding
+		ImGui_ImplSdl_Init(window);
 
 	glGenTextures(1, &gTextureOrig);
 	glBindTexture(GL_TEXTURE_2D, gTextureOrig);
@@ -1053,19 +1105,24 @@ int main(int aParamc, char**aParams)
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	}
+
+	if (pipe_mode)
+	{
+		pipe_loop();
+		return 0;
+	}
 
 	bool done = false;
 
-	int commandline_export = 0;	
+	int commandline_export = 0;
 	int commandline_export_fn = 0;
 	if (aParamc > 1)
 	{
-		int i;
-		for (i = 1; i < aParamc; i++)
+		for (int i = 1; i < aParamc; i++)
 		{
 			if (aParams[i][0] == '-')
 			{
-				// option
 				switch (aParams[i][1])
 				{
 				case 'p': commandline_export = 1; break;
@@ -1078,7 +1135,6 @@ int main(int aParamc, char**aParams)
 			}
 			else
 			{
-				// image or workspace. Just try both!
 				loadimg(aParams[i]);
 				loadworkspace(aParams[i]);
 			}
@@ -1092,15 +1148,13 @@ int main(int aParamc, char**aParams)
 	{
 		process_image();
 		gDevice->filter();
-
 		switch (commandline_export)
 		{
-		case 1:	savepng(aParams[commandline_export_fn]); break;
-		case 2:	saveh(aParams[commandline_export_fn]); break;
-		case 3:	saveinc(aParams[commandline_export_fn]); break;
-		case 4:	savescr(aParams[commandline_export_fn]); break;
+		case 1: savepng(aParams[commandline_export_fn]); break;
+		case 2: saveh(aParams[commandline_export_fn]); break;
+		case 3: saveinc(aParams[commandline_export_fn]); break;
+		case 4: savescr(aParams[commandline_export_fn]); break;
 		}
-
 		done = true;
 	}
 
@@ -1710,10 +1764,13 @@ int main(int aParamc, char**aParams)
     }
 
     // Cleanup
-    ImGui_ImplSdl_Shutdown();
-    SDL_GL_DeleteContext(glcontext);  
-	SDL_DestroyWindow(window);
-	SDL_Quit();
+    if (!pipe_mode)
+    {
+        ImGui_ImplSdl_Shutdown();
+        SDL_GL_DeleteContext(glcontext);  
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+    }
 
     return 0;
 }
