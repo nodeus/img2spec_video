@@ -118,6 +118,9 @@ int gOptExportEncoder = 0;
 int gOptExportQuality = 17;
 char gOptExportFilename[1024] = "";
 
+int gPipeWidth = 0;   // --width for --pipe mode
+int gPipeHeight = 0;  // --height for --pipe mode
+
 // Texture handles
 GLuint gTextureOrig, gTextureProc, gTextureSpec, gTextureAttr, gTextureAttr2, gTextureBitm; 
 
@@ -1078,17 +1081,12 @@ void start_video_export()
 	char cmd[16384];
 	sprintf(cmd,
 		"ffmpeg -loglevel error -i \"%s\" "
-		"-vf \"scale=%d:%d:force_original_aspect_ratio=decrease,"
-		"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black\" "
 		"-f rawvideo -pix_fmt rgb24 - | "
-		"\"%s\" \"%s\" --pipe | "
-		"ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d "
-		"-framerate %.2f -i - "
-		"-vf \"scale=iw*%d:ih*%d:flags=neighbor\" ",
+		"\"%s\" \"%s\" --pipe --width %d --height %d | "
+		"ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d ",
 		gVideoFilename,
-		gDevice->mXRes, gDevice->mYRes,
-		gDevice->mXRes, gDevice->mYRes,
 		exePath, workspacePath,
+		gVideoWidth, gVideoHeight,
 		gDevice->mXRes, gDevice->mYRes,
 		gVideoFps,
 		gOptExportScale, gOptExportScale);
@@ -1205,30 +1203,65 @@ void cancel_video_export()
 
 void pipe_loop()
 {
-	int w = gDevice->mXRes;
-	int h = gDevice->mYRes;
-	int pixels = w * h;
+	int dw = gDevice->mXRes;
+	int dh = gDevice->mYRes;
+	int dpixels = dw * dh;
 
 #ifdef _WIN32
 	_setmode(_fileno(stdin), _O_BINARY);
 	_setmode(_fileno(stdout), _O_BINARY);
 #endif
 
-	unsigned char *buf = new unsigned char[pixels * 3];
-	while (fread(buf, 1, pixels * 3, stdin) == (size_t)(pixels * 3))
+	// Use original resolution from --width/--height if provided, else device res
+	int sw = gPipeWidth > 0 ? gPipeWidth : dw;
+	int sh = gPipeHeight > 0 ? gPipeHeight : dh;
+	int spixels = sw * sh;
+
+	unsigned char *buf = new unsigned char[spixels * 3];
+	while (fread(buf, 1, spixels * 3, stdin) == (size_t)(spixels * 3))
 	{
-		for (int i = 0; i < pixels; i++)
+		// Store full-resolution source for modifiers (ScalePos etc.)
+		if (gSourceImageData)
+			stbi_image_free(gSourceImageData);
+		gSourceImageData = (unsigned int *)malloc(sw * sh * 4);
+		gSourceImageX = sw;
+		gSourceImageY = sh;
+		if (gSourceImageData)
 		{
-			int r = buf[i * 3 + 0];
-			int g = buf[i * 3 + 1];
-			int b = buf[i * 3 + 2];
-			gBitmapOrig[i] = r | (g << 8) | (b << 16) | 0xff000000;
+			for (int i = 0; i < spixels; i++)
+			{
+				int r = buf[i * 3 + 0];
+				int g = buf[i * 3 + 1];
+				int b = buf[i * 3 + 2];
+				gSourceImageData[i] = r | (g << 8) | (b << 16) | 0xff000000;
+			}
 		}
 
+		// Copy center-clipped version into device buffer
+		for (int y = 0; y < dh; y++)
+		{
+			for (int x = 0; x < dw; x++)
+			{
+				int pix = 0xff000000;
+				if (x < sw && y < sh)
+				{
+					int r = buf[(y * sw + x) * 3 + 0];
+					int g = buf[(y * sw + x) * 3 + 1];
+					int b = buf[(y * sw + x) * 3 + 2];
+					pix = r | (g << 8) | (b << 16) | 0xff000000;
+				}
+				gBitmapOrig[y * dw + x] = pix;
+			}
+		}
+
+		gDirtyPic = 1;
+		gDirty = 1;
 		process_image();
 		gDevice->filter();
+		gDirty = 0;
+		gDirtyPic = 0;
 
-		for (int i = 0; i < pixels; i++)
+		for (int i = 0; i < dpixels; i++)
 		{
 			unsigned int c = gBitmapSpec[i];
 			unsigned char rgba[4] = {
@@ -1346,6 +1379,15 @@ int main(int aParamc, char**aParams)
 		{
 			if (aParams[i][0] == '-')
 			{
+				// --width and --height for --pipe mode
+				if (aParams[i][1] == '-' && aParams[i][2] != 0)
+				{
+					if (strcmp(aParams[i] + 2, "width") == 0 && i + 1 < aParamc)
+						gPipeWidth = atoi(aParams[++i]);
+					else if (strcmp(aParams[i] + 2, "height") == 0 && i + 1 < aParamc)
+						gPipeHeight = atoi(aParams[++i]);
+					continue;
+				}
 				switch (aParams[i][1])
 				{
 				case 'p': commandline_export = 1; break;
