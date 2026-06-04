@@ -26,15 +26,23 @@ Still, if you find it useful, great!
 
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
+#define NOMINMAX
 #endif
 
+#include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
 #include "platform/common.h"
 
 #include "imgui.h"
 #include "imgui_impl_sdl.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
+#include <algorithm>
 #include <SDL.h>
 #include <SDL_syswm.h>
 #include <SDL_opengl.h>
@@ -50,7 +58,7 @@ Still, if you find it useful, great!
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize.h"
 
-#define VERSION "4.0"
+#define VERSION "5.0"
 
 #define SERIALIZE(x) json_object_dotset_number(root, #x, x);
 #define DESERIALIZE(x) if (json_object_dotget_value(root, #x) != NULL) x = json_object_dotget_number(root, #x);
@@ -92,6 +100,26 @@ int gOptZoom = 2;
 int gOptZoomStyle = 0;
 int gOptTrackFile = 1;
 int gDeviceId = 0;
+
+// Видео-режим
+bool gVideoMode = false;
+char gVideoFilename[1024] = "";
+double gVideoDuration = 0.0;
+double gVideoFps = 25.0;
+int gVideoTotalFrames = 0;
+int gVideoCurrentFrame = 0;
+int gVideoWidth = 0;
+int gVideoHeight = 0;
+bool gWindowExport = false;
+bool gVideoExportActive = false;
+float gVideoExportProgress = 0.0f;
+int gOptExportScale = 8;
+int gOptExportEncoder = 0;
+int gOptExportQuality = 17;
+char gOptExportFilename[1024] = "";
+
+int gPipeWidth = 0;   // --width for --pipe mode
+int gPipeHeight = 0;  // --height for --pipe mode
 
 // Texture handles
 GLuint gTextureOrig, gTextureProc, gTextureSpec, gTextureAttr, gTextureAttr2, gTextureBitm; 
@@ -838,34 +866,462 @@ void measurecrap()
 }
 */
 
+char *run_pipe(const char *cmd)
+{
+#ifdef _WIN32
+	FILE *f = _popen(cmd, "rt");
+#else
+	FILE *f = popen(cmd, "r");
+#endif
+	if (!f) return 0;
+	static char buf[4096];
+	buf[0] = 0;
+	fgets(buf, sizeof(buf), f);
+#ifdef _WIN32
+	_pclose(f);
+#else
+	pclose(f);
+#endif
+	if (buf[0] == 0) return 0;
+	// trim newline
+	size_t len = strlen(buf);
+	while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+		buf[--len] = 0;
+	return buf;
+}
+
+void get_video_frame(int frameNum)
+{
+	if (gVideoWidth == 0 || gVideoHeight == 0) return;
+
+	double sec = (double)frameNum / gVideoFps;
+	int vw = gVideoWidth;
+	int vh = gVideoHeight;
+
+	char cmd[4096];
+#ifdef _WIN32
+	sprintf(cmd,
+		"ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 "
+		"-s %dx%d -v quiet -",
+		sec, gVideoFilename, vw, vh);
+	FILE *pipe = _popen(cmd, "rb");
+#else
+	sprintf(cmd,
+		"ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 "
+		"-s %dx%d -v quiet -",
+		sec, gVideoFilename, vw, vh);
+	FILE *pipe = popen(cmd, "r");
+#endif
+	if (!pipe) return;
+
+	unsigned char *buf = new unsigned char[vw * vh * 3];
+	size_t read = fread(buf, 1, vw * vh * 3, pipe);
+#ifdef _WIN32
+	_pclose(pipe);
+#else
+	pclose(pipe);
+#endif
+
+	if (read != (size_t)(vw * vh * 3))
+	{
+		delete[] buf;
+		return;
+	}
+
+	// Store original frame as RGBA in gSourceImageData (for ScalePosModifier)
+	if (gSourceImageData)
+		stbi_image_free(gSourceImageData);
+	gSourceImageData = (unsigned int *)malloc(vw * vh * 4);
+	gSourceImageX = vw;
+	gSourceImageY = vh;
+
+	if (gSourceImageData)
+	{
+		for (int i = 0; i < vw * vh; i++)
+		{
+			int r = buf[i * 3 + 0];
+			int g = buf[i * 3 + 1];
+			int b = buf[i * 3 + 2];
+			gSourceImageData[i] = r | (g << 8) | (b << 16) | 0xff000000;
+		}
+	}
+
+	// Copy into device buffer (centered, clipped — triggers modifiers + filter)
+	for (int y = 0; y < gDevice->mYRes; y++)
+	{
+		for (int x = 0; x < gDevice->mXRes; x++)
+		{
+			int pix = 0xff000000;
+			if (x < vw && y < vh)
+			{
+				int r = buf[(y * vw + x) * 3 + 0];
+				int g = buf[(y * vw + x) * 3 + 1];
+				int b = buf[(y * vw + x) * 3 + 2];
+				pix = r | (g << 8) | (b << 16) | 0xff000000;
+			}
+			gBitmapOrig[y * gDevice->mXRes + x] = pix;
+		}
+	}
+
+	delete[] buf;
+	gVideoCurrentFrame = frameNum;
+	gDirty = 1;
+	gDirtyPic = 1; // triggers ScalePosModifier to re-scale from gSourceImageData
+}
+
+void load_video(const char *filename)
+{
+	if (!filename) return;
+
+	char cmd[4096];
+	const char *res;
+
+	// ffprobe: resolution
+	sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 \"%s\"", filename);
+	res = run_pipe(cmd);
+	if (!res) { printf("ffprobe error: can't get video info\n"); return; }
+	if (sscanf(res, "%d,%d", &gVideoWidth, &gVideoHeight) != 2) return;
+
+	// ffprobe: duration
+	sprintf(cmd, "ffprobe -v error -show_entries format=duration -of csv=p=0 \"%s\"", filename);
+	res = run_pipe(cmd);
+	if (!res) return;
+	gVideoDuration = atof(res);
+
+	// ffprobe: frame rate
+	sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 \"%s\"", filename);
+	res = run_pipe(cmd);
+	if (!res) return;
+	// r_frame_rate is "num/den" or "num"
+	if (strchr(res, '/'))
+	{
+		int num = 0, den = 1;
+		sscanf(res, "%d/%d", &num, &den);
+		gVideoFps = (den > 0) ? (double)num / den : 25.0;
+	}
+	else
+	{
+		gVideoFps = atof(res);
+	}
+	if (gVideoFps <= 0) gVideoFps = 25.0;
+
+	gVideoTotalFrames = (int)(gVideoDuration * gVideoFps + 0.5);
+	gVideoCurrentFrame = 0;
+	gVideoMode = true;
+	strcpy(gVideoFilename, filename);
+
+	// Загружаем первый кадр
+	get_video_frame(0);
+}
+
+int pipe_mode = 0;
+
+#ifdef _WIN32
+#include <windows.h>
+static PROCESS_INFORMATION gExportProc;
+static HANDLE gExportStderrRead = NULL;
+static int gExportRunning = 0;
+#endif
+
+void start_video_export()
+{
+	if (gOptExportFilename[0] == 0)
+	{
+		const char *base = strrchr(gVideoFilename, '\\');
+		if (!base) base = strrchr(gVideoFilename, '/');
+		if (base) base++; else base = gVideoFilename;
+		strcpy(gOptExportFilename, base);
+		char *dot = strrchr(gOptExportFilename, '.');
+		if (dot) *dot = 0;
+		strcat(gOptExportFilename, "_spmz.mp4");
+	}
+
+#ifdef _WIN32
+	// Get full path to this executable (has --pipe support)
+	char exePath[MAX_PATH];
+	GetModuleFileNameA(NULL, exePath, MAX_PATH);
+
+	// Save current workspace (modifiers + device) to temp file
+	char workspacePath[MAX_PATH];
+	GetTempPathA(MAX_PATH, workspacePath);
+	strcat(workspacePath, "img2spec_export.isw");
+
+	build_applystack();
+	JSON_Value *root_value = json_value_init_object();
+	JSON_Object *root = json_value_get_object(root_value);
+	json_object_dotset_string(root, "About.WhatIsThis", "Image Spectrumizer " VERSION " workspace file");
+	json_object_dotset_string(root, "About.Magic", "0x50534D49");
+	json_object_dotset_number(root, "About.Version", 4);
+
+#define WRITECONFIG(x) json_object_dotset_number(root, "Config." #x, x);
+	WRITECONFIG(gDeviceId);
+#undef WRITECONFIG
+	json_object_dotset_string(root, "Device.Name", gDevice->getname());
+	gDevice->writeOptions(root);
+
+	Modifier *walker = gModifierApplyStack;
+	int number = 0;
+	while (walker)
+	{
+		char path[256], temp[256];
+		sprintf(path, "Stack.Item[%d]", number);
+		sprintf(temp, "%s.Name", path);
+		json_object_dotset_string(root, temp, walker->getname());
+		sprintf(temp, "%s.Type", path);
+		json_object_dotset_number(root, temp, walker->gettype());
+		JSON_Object *item = json_object_dotget_object(root, path);
+		walker->serialize_common(item);
+		walker->serialize(item);
+		walker = walker->mApplyNext;
+		number++;
+	}
+	json_serialize_to_file_pretty(root_value, workspacePath);
+	json_value_free(root_value);
+
+	int outW = gDevice->mXRes * gOptExportScale;
+	int outH = gDevice->mYRes * gOptExportScale;
+	char cmd[16384];
+	sprintf(cmd,
+		"ffmpeg -loglevel error -i \"%s\" "
+		"-f rawvideo -pix_fmt rgb24 - | "
+		"\"%s\" \"%s\" --pipe --width %d --height %d | "
+		"ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d -r %d -i - "
+		"-vf scale=%d:%d ",
+		gVideoFilename,
+		exePath, workspacePath,
+		gVideoWidth, gVideoHeight,
+		gDevice->mXRes, gDevice->mYRes,
+		(int)gVideoFps,
+		outW, outH);
+
+	// Encoder-specific args
+	switch (gOptExportEncoder)
+	{
+	case 0: // NVIDIA NVENC
+		sprintf(cmd + strlen(cmd),
+			"-c:v hevc_nvenc -profile:v main -pix_fmt yuv420p "
+			"-preset fast -rc constqp -qp %d -init_qpB 2 \"%s\"",
+			gOptExportQuality, gOptExportFilename);
+		break;
+	case 1: // AMD AMF
+		sprintf(cmd + strlen(cmd),
+			"-c:v hevc_amf -rc cqp -qp_p %d -qp_i %d -pix_fmt yuv420p \"%s\"",
+			gOptExportQuality, gOptExportQuality, gOptExportFilename);
+		break;
+	default: // CPU x264
+		sprintf(cmd + strlen(cmd),
+			"-c:v libx264 -crf %d -pix_fmt yuv420p \"%s\"",
+			gOptExportQuality, gOptExportFilename);
+		break;
+	}
+
+	// Write batch file (needed for cmd.exe pipeline with |)
+	char batchPath[MAX_PATH];
+	GetTempPathA(MAX_PATH, batchPath);
+	strcat(batchPath, "img2spec_export.bat");
+
+	FILE *f = fopen(batchPath, "w");
+	fprintf(f, "%s\n", cmd);
+	fclose(f);
+
+	// Run batch file via cmd.exe (CREATE_NO_WINDOW = no console window)
+	char cmdline[MAX_PATH + 32];
+	sprintf(cmdline, "cmd.exe /c \"%s\"", batchPath);
+
+	STARTUPINFOA si = {0};
+	si.cb = sizeof(si);
+	PROCESS_INFORMATION pi = {0};
+
+	gExportRunning = 1;
+	gVideoExportProgress = 0.0f;
+
+	if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
+		0, NULL, NULL, &si, &pi))
+	{
+		gExportRunning = 0;
+		printf("Export: CreateProcess failed (error %d)\n", GetLastError());
+	}
+	else
+	{
+		gExportProc = pi;
+	}
+#endif
+}
+
+void poll_video_export()
+{
+#ifdef _WIN32
+	if (!gExportRunning) return;
+
+	DWORD exitCode;
+	if (GetExitCodeProcess(gExportProc.hProcess, &exitCode) && exitCode == STILL_ACTIVE)
+	{
+		// Still running — update progress estimate based on frame position
+		// (no accurate progress without parsing ffmpeg stderr)
+		gVideoExportProgress = (float)gVideoCurrentFrame / (float)gVideoTotalFrames;
+	}
+	else
+	{
+		// Done
+		gExportRunning = 0;
+		gVideoExportProgress = 1.0f;
+		gVideoExportActive = false;
+		CloseHandle(gExportProc.hProcess);
+		CloseHandle(gExportProc.hThread);
+
+		// Audio remux (no console window)
+		char remuxCmd[8192];
+		sprintf(remuxCmd,
+			"cmd.exe /c ffmpeg -loglevel error -i \"%s\" -i \"%s\" "
+			"-c:v copy -c:a aac -map 0:v:0 -map 1:a:0 -y \"%s_tmp.mp4\" "
+			"&& move /Y \"%s_tmp.mp4\" \"%s\"",
+			gOptExportFilename, gVideoFilename,
+			gOptExportFilename, gOptExportFilename, gOptExportFilename);
+		STARTUPINFOA si2 = {0}; si2.cb = sizeof(si2);
+		PROCESS_INFORMATION pi2 = {0};
+		CreateProcessA(NULL, remuxCmd, NULL, NULL, FALSE,
+			CREATE_NO_WINDOW, NULL, NULL, &si2, &pi2);
+		WaitForSingleObject(pi2.hProcess, INFINITE);
+		CloseHandle(pi2.hProcess);
+		CloseHandle(pi2.hThread);
+
+		printf("Export complete: %s\n", gOptExportFilename);
+	}
+#endif
+}
+
+void cancel_video_export()
+{
+#ifdef _WIN32
+	if (gExportRunning)
+	{
+		TerminateProcess(gExportProc.hProcess, 1);
+		CloseHandle(gExportProc.hProcess);
+		CloseHandle(gExportProc.hThread);
+		gExportRunning = 0;
+		gVideoExportActive = false;
+	}
+#endif
+}
+
+void pipe_loop()
+{
+	int dw = gDevice->mXRes;
+	int dh = gDevice->mYRes;
+	int dpixels = dw * dh;
+
+#ifdef _WIN32
+	_setmode(_fileno(stdin), _O_BINARY);
+	_setmode(_fileno(stdout), _O_BINARY);
+#endif
+
+	// Use original resolution from --width/--height if provided, else device res
+	int sw = gPipeWidth > 0 ? gPipeWidth : dw;
+	int sh = gPipeHeight > 0 ? gPipeHeight : dh;
+	int spixels = sw * sh;
+
+	unsigned char *buf = new unsigned char[spixels * 3];
+	while (fread(buf, 1, spixels * 3, stdin) == (size_t)(spixels * 3))
+	{
+		// Store full-resolution source for modifiers (ScalePos etc.)
+		if (gSourceImageData)
+			stbi_image_free(gSourceImageData);
+		gSourceImageData = (unsigned int *)malloc(sw * sh * 4);
+		gSourceImageX = sw;
+		gSourceImageY = sh;
+		if (gSourceImageData)
+		{
+			for (int i = 0; i < spixels; i++)
+			{
+				int r = buf[i * 3 + 0];
+				int g = buf[i * 3 + 1];
+				int b = buf[i * 3 + 2];
+				gSourceImageData[i] = r | (g << 8) | (b << 16) | 0xff000000;
+			}
+		}
+
+		// Copy center-clipped version into device buffer
+		for (int y = 0; y < dh; y++)
+		{
+			for (int x = 0; x < dw; x++)
+			{
+				int pix = 0xff000000;
+				if (x < sw && y < sh)
+				{
+					int r = buf[(y * sw + x) * 3 + 0];
+					int g = buf[(y * sw + x) * 3 + 1];
+					int b = buf[(y * sw + x) * 3 + 2];
+					pix = r | (g << 8) | (b << 16) | 0xff000000;
+				}
+				gBitmapOrig[y * dw + x] = pix;
+			}
+		}
+
+		gDirtyPic = 1;
+		gDirty = 1;
+		process_image();
+		gDevice->filter();
+		gDirty = 0;
+		gDirtyPic = 0;
+
+		for (int i = 0; i < dpixels; i++)
+		{
+			unsigned int c = gBitmapSpec[i];
+			unsigned char rgba[4] = {
+				(unsigned char)(c & 0xff),
+				(unsigned char)((c >> 8) & 0xff),
+				(unsigned char)((c >> 16) & 0xff),
+				0xff };
+			fwrite(rgba, 1, 4, stdout);
+		}
+		fflush(stdout);
+	}
+	delete[] buf;
+}
+
 int main(int aParamc, char**aParams)
 {
 	SDL_SysWMinfo wminfo;
 
 	gDevice = new ZXSpectrumDevice;
-	// Setup SDL
-	if (SDL_Init(SDL_INIT_EVERYTHING) != 0)
+
+	// Pre-scan: detect --pipe mode
+	pipe_mode = 0;
+	for (int i = 1; i < aParamc; i++)
 	{
-        printf("Error: %s\n", SDL_GetError());
-        return -1;
+		if (strcmp(aParams[i], "--pipe") == 0)
+			pipe_mode = 1;
 	}
 
-    // Setup window
-	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
-	SDL_DisplayMode current;
-	SDL_GetCurrentDisplayMode(0, &current);
-	SDL_Window *window = SDL_CreateWindow("Image Spectrumizer " VERSION " - http://iki.fi/sol", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
-	SDL_GLContext glcontext = SDL_GL_CreateContext(window);
-	SDL_VERSION(&wminfo.version);
-	SDL_GetWindowWMInfo(window, &wminfo);
-    // Setup ImGui binding
-    ImGui_ImplSdl_Init(window);
+	SDL_Window *window = 0;
+	SDL_GLContext glcontext = 0;
+	ImVec4 clear_color(0, 0, 0, 0);
 
-    ImVec4 clear_color = ImColor(114, 144, 154);
+	if (!pipe_mode)
+	{
+		clear_color = ImColor(114, 144, 154);
+
+		// Setup SDL
+		if (SDL_Init(SDL_INIT_EVERYTHING) != 0)
+		{
+			printf("Error: %s\n", SDL_GetError());
+			return -1;
+		}
+
+		// Setup window
+		SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+		SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+		SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+		SDL_DisplayMode current;
+		SDL_GetCurrentDisplayMode(0, &current);
+		window = SDL_CreateWindow("Image Spectrumizer " VERSION " - http://iki.fi/sol", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
+		glcontext = SDL_GL_CreateContext(window);
+		SDL_VERSION(&wminfo.version);
+		SDL_GetWindowWMInfo(window, &wminfo);
+		// Setup ImGui binding
+		ImGui_ImplSdl_Init(window);
 
 	glGenTextures(1, &gTextureOrig);
 	glBindTexture(GL_TEXTURE_2D, gTextureOrig);
@@ -914,19 +1370,27 @@ int main(int aParamc, char**aParams)
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	}
 
 	bool done = false;
 
-	int commandline_export = 0;	
+	int commandline_export = 0;
 	int commandline_export_fn = 0;
 	if (aParamc > 1)
 	{
-		int i;
-		for (i = 1; i < aParamc; i++)
+		for (int i = 1; i < aParamc; i++)
 		{
 			if (aParams[i][0] == '-')
 			{
-				// option
+				// --width and --height for --pipe mode
+				if (aParams[i][1] == '-' && aParams[i][2] != 0)
+				{
+					if (strcmp(aParams[i] + 2, "width") == 0 && i + 1 < aParamc)
+						gPipeWidth = atoi(aParams[++i]);
+					else if (strcmp(aParams[i] + 2, "height") == 0 && i + 1 < aParamc)
+						gPipeHeight = atoi(aParams[++i]);
+					continue;
+				}
 				switch (aParams[i][1])
 				{
 				case 'p': commandline_export = 1; break;
@@ -939,11 +1403,17 @@ int main(int aParamc, char**aParams)
 			}
 			else
 			{
-				// image or workspace. Just try both!
 				loadimg(aParams[i]);
 				loadworkspace(aParams[i]);
 			}
 		}
+	}
+
+	// --pipe mode: workspace loaded above, now enter pipe loop
+	if (pipe_mode)
+	{
+		pipe_loop();
+		return 0;
 	}
 
 	if (aParamc < commandline_export_fn)
@@ -953,15 +1423,13 @@ int main(int aParamc, char**aParams)
 	{
 		process_image();
 		gDevice->filter();
-
 		switch (commandline_export)
 		{
-		case 1:	savepng(aParams[commandline_export_fn]); break;
-		case 2:	saveh(aParams[commandline_export_fn]); break;
-		case 3:	saveinc(aParams[commandline_export_fn]); break;
-		case 4:	savescr(aParams[commandline_export_fn]); break;
+		case 1: savepng(aParams[commandline_export_fn]); break;
+		case 2: saveh(aParams[commandline_export_fn]); break;
+		case 3: saveinc(aParams[commandline_export_fn]); break;
+		case 4: savescr(aParams[commandline_export_fn]); break;
 		}
-
 		done = true;
 	}
 
@@ -992,6 +1460,13 @@ int main(int aParamc, char**aParams)
 			if (ImGui::BeginMenu("File"))
 			{
 				if (ImGui::MenuItem("Load image")) { loadimg(); }
+				if (ImGui::MenuItem("Load video")) { const char *fn = openDialog("Load video",
+					"All supported video\0*.mp4;*.avi;*.mkv;*.mov;*.webm;*.flv\0"
+					"MP4 (*.mp4)\0*.mp4\0"
+					"AVI (*.avi)\0*.avi\0"
+					"MKV (*.mkv)\0*.mkv\0"
+					"All Files (" ALL_FILES ")\0" ALL_FILES "\0\0");
+					if (fn) load_video(fn); }
 				if (ImGui::MenuItem("Reload changed image", 0, (bool*)&gOptTrackFile)) {};
 				if (ImGui::MenuItem("Topmost window", 0, (bool*)&gOptTopmost)) { gDirty = 1; };
 				ImGui::Separator();
@@ -1354,6 +1829,40 @@ int main(int aParamc, char**aParams)
 			}
 			ImGui::End();
 		}
+
+		if (gWindowExport && gVideoMode)
+		{
+			if (ImGui::Begin("Export video", &gWindowExport,
+				ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize))
+			{
+				ImGui::InputText("Output file", gOptExportFilename, 1024);
+				ImGui::Combo("Encoder", &gOptExportEncoder,
+					"NVIDIA NVENC\0AMD AMF\0CPU x264\0");
+				ImGui::SliderInt("Quality (CRF/QP)", &gOptExportQuality, 0, 51);
+				ImGui::SliderInt("Scale", &gOptExportScale, 1, 32);
+				const char *encoders[] = {"NVENC", "AMF", "x264"};
+				ImGui::Text("Settings: %s | x%d | Q%d",
+					encoders[gOptExportEncoder],
+					gOptExportScale, gOptExportQuality);
+
+				if (gVideoExportActive)
+				{
+					int pct = (int)(gVideoExportProgress * 100);
+					ImGui::Text("Progress: %d%%", pct);
+					if (ImGui::Button("Cancel"))
+						cancel_video_export();
+				}
+				else
+				{
+					if (ImGui::Button("Start export"))
+					{
+						start_video_export();
+						gVideoExportActive = true;
+					}
+				}
+			}
+			ImGui::End();
+		}
 		
 		if (gOptImagesDocked)
 		{
@@ -1429,6 +1938,55 @@ int main(int aParamc, char**aParams)
 		ImGui::Checkbox("Result", &gOptShowResult); ImGui::SameLine();
 		ImGui::Checkbox("Dock images", &gOptImagesDocked);
 
+		if (gVideoMode)
+		{
+			ImGui::Separator();
+
+			int frame = gVideoCurrentFrame;
+			if (ImGui::SliderInt("##timeline", &frame, 0,
+				(gVideoTotalFrames > 1) ? (gVideoTotalFrames - 1) : 1,
+				"Frame %d"))
+			{
+				if (frame != gVideoCurrentFrame && frame >= 0 &&
+					frame < gVideoTotalFrames)
+					get_video_frame(frame);
+			}
+
+			ImGui::SameLine();
+			if (ImGui::Button("|<")) get_video_frame(0);
+			ImGui::SameLine();
+			if (ImGui::Button("<"))
+				get_video_frame(std::max(0, gVideoCurrentFrame - 1));
+			ImGui::SameLine();
+			if (ImGui::Button(">"))
+				get_video_frame(std::min(gVideoTotalFrames - 1, gVideoCurrentFrame + 1));
+			ImGui::SameLine();
+			if (ImGui::Button(">|"))
+				get_video_frame(gVideoTotalFrames - 1);
+			ImGui::SameLine();
+
+			int sec = (int)(gVideoCurrentFrame / gVideoFps);
+			int totalSec = (int)(gVideoDuration);
+			ImGui::Text("%02d:%02d / %02d:%02d (%.0f fps)",
+				sec / 60, sec % 60,
+				totalSec / 60, totalSec % 60,
+				gVideoFps);
+
+		ImGui::Separator();
+		if (ImGui::Button("Export video..."))
+		{
+			// Set default output filename (basename only, save in CWD)
+			const char *base = strrchr(gVideoFilename, '\\');
+			if (!base) base = strrchr(gVideoFilename, '/');
+			if (base) base++; else base = gVideoFilename;
+			strcpy(gOptExportFilename, base);
+			char *dot = strrchr(gOptExportFilename, '.');
+			if (dot) *dot = 0;
+			strcat(gOptExportFilename, "_spmz.mp4");
+			gWindowExport = true;
+		}
+		}
+
 		if (!gOptImagesDocked)
 		{
 			ImGui::End();
@@ -1443,22 +2001,23 @@ int main(int aParamc, char**aParams)
 		ImGui::EndChild();		
 		ImGui::End();
 
-		if (gOptTrackFile && gSourceImageData)
+		if (gOptTrackFile && !gVideoMode && gSourceImageName)
 		{
 			int fd = getFileDate(gSourceImageName);
 			if (fd != gSourceImageDate)
 				loadimg(gSourceImageName);
 		}
 
-		if (gDirtyPic && gSourceImageData)
+		if (gDirtyPic && !gVideoMode)
 		{
-			loadimg(gSourceImageName);
+			if (gSourceImageData)
+				loadimg(gSourceImageName);
+			else
+				generateimg();
 		}
 
-		if (gDirtyPic && !gSourceImageData)
-		{
-			generateimg();
-		}
+		if (gVideoExportActive)
+			poll_video_export();
 
 		if (gDirty)
 		{
@@ -1489,10 +2048,13 @@ int main(int aParamc, char**aParams)
     }
 
     // Cleanup
-    ImGui_ImplSdl_Shutdown();
-    SDL_GL_DeleteContext(glcontext);  
-	SDL_DestroyWindow(window);
-	SDL_Quit();
+    if (!pipe_mode)
+    {
+        ImGui_ImplSdl_Shutdown();
+        SDL_GL_DeleteContext(glcontext);  
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+    }
 
     return 0;
 }

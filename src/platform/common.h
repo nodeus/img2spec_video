@@ -1,7 +1,7 @@
 #ifndef IMG2SPEC_COMMON_H
 #define IMG2SPEC_COMMON_H
 
-#ifndef _stricmp
+#if !defined(_stricmp) && !defined(_WIN32)
 #define _stricmp(s1, s2) strcasecmp(s1, s2)
 #endif
 
