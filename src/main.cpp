@@ -1000,7 +1000,10 @@ void start_video_export()
 {
 	if (gOptExportFilename[0] == 0)
 	{
-		strcpy(gOptExportFilename, gVideoFilename);
+		const char *base = strrchr(gVideoFilename, '\\');
+		if (!base) base = strrchr(gVideoFilename, '/');
+		if (base) base++; else base = gVideoFilename;
+		strcpy(gOptExportFilename, base);
 		char *dot = strrchr(gOptExportFilename, '.');
 		if (dot) *dot = 0;
 		strcat(gOptExportFilename, "_spmz.mp4");
@@ -1903,8 +1906,11 @@ int main(int aParamc, char**aParams)
 		ImGui::Separator();
 		if (ImGui::Button("Export video..."))
 		{
-			// Set default output filename from input video
-			strcpy(gOptExportFilename, gVideoFilename);
+			// Set default output filename (basename only, save in CWD)
+			const char *base = strrchr(gVideoFilename, '\\');
+			if (!base) base = strrchr(gVideoFilename, '/');
+			if (base) base++; else base = gVideoFilename;
+			strcpy(gOptExportFilename, base);
 			char *dot = strrchr(gOptExportFilename, '.');
 			if (dot) *dot = 0;
 			strcat(gOptExportFilename, "_spmz.mp4");
