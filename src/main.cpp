@@ -30,6 +30,10 @@ Still, if you find it useful, great!
 #endif
 
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
 #include "platform/common.h"
 
 #include "imgui.h"
@@ -1100,7 +1104,7 @@ void start_video_export()
 	gVideoExportProgress = 0.0f;
 
 	if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-		CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+		DETACHED_PROCESS, NULL, NULL, &si, &pi))
 	{
 		gExportRunning = 0;
 		printf("Export: CreateProcess failed (error %d)\n", GetLastError());
@@ -1167,6 +1171,11 @@ void pipe_loop()
 	int w = gDevice->mXRes;
 	int h = gDevice->mYRes;
 	int pixels = w * h;
+
+#ifdef _WIN32
+	_setmode(_fileno(stdin), _O_BINARY);
+	_setmode(_fileno(stdout), _O_BINARY);
+#endif
 
 	unsigned char *buf = new unsigned char[pixels * 3];
 	while (fread(buf, 1, pixels * 3, stdin) == (size_t)(pixels * 3))
