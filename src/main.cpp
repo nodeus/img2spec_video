@@ -26,15 +26,19 @@ Still, if you find it useful, great!
 
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
+#define NOMINMAX
 #endif
 
+#include <string.h>
 #include "platform/common.h"
 
 #include "imgui.h"
 #include "imgui_impl_sdl.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
+#include <algorithm>
 #include <SDL.h>
 #include <SDL_syswm.h>
 #include <SDL_opengl.h>
@@ -92,6 +96,23 @@ int gOptZoom = 2;
 int gOptZoomStyle = 0;
 int gOptTrackFile = 1;
 int gDeviceId = 0;
+
+// Видео-режим
+bool gVideoMode = false;
+char gVideoFilename[1024] = "";
+double gVideoDuration = 0.0;
+double gVideoFps = 25.0;
+int gVideoTotalFrames = 0;
+int gVideoCurrentFrame = 0;
+int gVideoWidth = 0;
+int gVideoHeight = 0;
+bool gWindowExport = false;
+bool gVideoExportActive = false;
+float gVideoExportProgress = 0.0f;
+int gOptExportScale = 8;
+int gOptExportEncoder = 0;
+int gOptExportQuality = 17;
+char gOptExportFilename[1024] = "";
 
 // Texture handles
 GLuint gTextureOrig, gTextureProc, gTextureSpec, gTextureAttr, gTextureAttr2, gTextureBitm; 
@@ -838,6 +859,124 @@ void measurecrap()
 }
 */
 
+char *run_pipe(const char *cmd)
+{
+#ifdef _WIN32
+	FILE *f = _popen(cmd, "rt");
+#else
+	FILE *f = popen(cmd, "r");
+#endif
+	if (!f) return 0;
+	static char buf[4096];
+	buf[0] = 0;
+	fgets(buf, sizeof(buf), f);
+#ifdef _WIN32
+	_pclose(f);
+#else
+	pclose(f);
+#endif
+	if (buf[0] == 0) return 0;
+	// trim newline
+	size_t len = strlen(buf);
+	while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+		buf[--len] = 0;
+	return buf;
+}
+
+void get_video_frame(int frameNum)
+{
+	if (gVideoWidth == 0 || gVideoHeight == 0) return;
+
+	double sec = (double)frameNum / gVideoFps;
+	int w = gDevice->mXRes;
+	int h = gDevice->mYRes;
+	int pixels = w * h;
+
+	char cmd[4096];
+#ifdef _WIN32
+	sprintf(cmd, "ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 -s %dx%d -v quiet -",
+		sec, gVideoFilename, w, h);
+	FILE *pipe = _popen(cmd, "rb");
+#else
+	sprintf(cmd, "ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 -s %dx%d -v quiet -",
+		sec, gVideoFilename, w, h);
+	FILE *pipe = popen(cmd, "r");
+#endif
+	if (!pipe) return;
+
+	unsigned char *buf = new unsigned char[pixels * 3];
+	size_t read = fread(buf, 1, pixels * 3, pipe);
+#ifdef _WIN32
+	_pclose(pipe);
+#else
+	pclose(pipe);
+#endif
+
+	if (read != (size_t)(pixels * 3))
+	{
+		delete[] buf;
+		return;
+	}
+
+	for (int i = 0; i < pixels; i++)
+	{
+		int r = buf[i * 3 + 0];
+		int g = buf[i * 3 + 1];
+		int b = buf[i * 3 + 2];
+		gBitmapOrig[i] = 0xff000000 | (r << 16) | (g << 8) | b;
+	}
+
+	delete[] buf;
+	gVideoCurrentFrame = frameNum;
+	gDirty = 1;
+	gDirtyPic = 0;
+}
+
+void load_video(const char *filename)
+{
+	if (!filename) return;
+
+	char cmd[4096];
+	const char *res;
+
+	// ffprobe: resolution
+	sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 \"%s\"", filename);
+	res = run_pipe(cmd);
+	if (!res) { printf("ffprobe error: can't get video info\n"); return; }
+	if (sscanf(res, "%d,%d", &gVideoWidth, &gVideoHeight) != 2) return;
+
+	// ffprobe: duration
+	sprintf(cmd, "ffprobe -v error -show_entries format=duration -of csv=p=0 \"%s\"", filename);
+	res = run_pipe(cmd);
+	if (!res) return;
+	gVideoDuration = atof(res);
+
+	// ffprobe: frame rate
+	sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 \"%s\"", filename);
+	res = run_pipe(cmd);
+	if (!res) return;
+	// r_frame_rate is "num/den" or "num"
+	if (strchr(res, '/'))
+	{
+		int num = 0, den = 1;
+		sscanf(res, "%d/%d", &num, &den);
+		gVideoFps = (den > 0) ? (double)num / den : 25.0;
+	}
+	else
+	{
+		gVideoFps = atof(res);
+	}
+	if (gVideoFps <= 0) gVideoFps = 25.0;
+
+	gVideoTotalFrames = (int)(gVideoDuration * gVideoFps + 0.5);
+	gVideoCurrentFrame = 0;
+	gVideoMode = true;
+	strcpy(gVideoFilename, filename);
+
+	// Загружаем первый кадр
+	get_video_frame(0);
+}
+
 int main(int aParamc, char**aParams)
 {
 	SDL_SysWMinfo wminfo;
@@ -992,6 +1131,13 @@ int main(int aParamc, char**aParams)
 			if (ImGui::BeginMenu("File"))
 			{
 				if (ImGui::MenuItem("Load image")) { loadimg(); }
+				if (ImGui::MenuItem("Load video")) { const char *fn = openDialog("Load video",
+					"All supported video\0*.mp4;*.avi;*.mkv;*.mov;*.webm;*.flv\0"
+					"MP4 (*.mp4)\0*.mp4\0"
+					"AVI (*.avi)\0*.avi\0"
+					"MKV (*.mkv)\0*.mkv\0"
+					"All Files (" ALL_FILES ")\0" ALL_FILES "\0\0");
+					if (fn) load_video(fn); }
 				if (ImGui::MenuItem("Reload changed image", 0, (bool*)&gOptTrackFile)) {};
 				if (ImGui::MenuItem("Topmost window", 0, (bool*)&gOptTopmost)) { gDirty = 1; };
 				ImGui::Separator();
@@ -1354,6 +1500,42 @@ int main(int aParamc, char**aParams)
 			}
 			ImGui::End();
 		}
+
+		if (gWindowExport && gVideoMode)
+		{
+			if (ImGui::Begin("Export video", &gWindowExport,
+				ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize))
+			{
+				ImGui::InputText("Output file", gOptExportFilename, 1024);
+				ImGui::Combo("Encoder", &gOptExportEncoder,
+					"NVIDIA NVENC\0AMD AMF\0CPU x264\0");
+				ImGui::SliderInt("Quality (CRF/QP)", &gOptExportQuality, 0, 51);
+				ImGui::SliderInt("Scale", &gOptExportScale, 1, 32);
+				const char *encoders[] = {"NVENC", "AMF", "x264"};
+				ImGui::Text("Settings: %s | x%d | Q%d",
+					encoders[gOptExportEncoder],
+					gOptExportScale, gOptExportQuality);
+
+				if (gVideoExportActive)
+				{
+					int pct = (int)(gVideoExportProgress * 100);
+					ImGui::Text("Progress: %d%%", pct);
+					if (ImGui::Button("Cancel"))
+						gVideoExportActive = false;
+				}
+				else
+				{
+					if (ImGui::Button("Start export"))
+					{
+						if (gOptExportFilename[0] == 0)
+							strcpy(gOptExportFilename, "output_smzd.mp4");
+						gVideoExportActive = true;
+						gVideoExportProgress = 0.0f;
+					}
+				}
+			}
+			ImGui::End();
+		}
 		
 		if (gOptImagesDocked)
 		{
@@ -1428,6 +1610,45 @@ int main(int aParamc, char**aParams)
 		ImGui::Checkbox("Modified", &gOptShowModified); ImGui::SameLine();
 		ImGui::Checkbox("Result", &gOptShowResult); ImGui::SameLine();
 		ImGui::Checkbox("Dock images", &gOptImagesDocked);
+
+		if (gVideoMode)
+		{
+			ImGui::Separator();
+
+			int frame = gVideoCurrentFrame;
+			if (ImGui::SliderInt("##timeline", &frame, 0,
+				(gVideoTotalFrames > 1) ? (gVideoTotalFrames - 1) : 1,
+				"Frame %d"))
+			{
+				if (frame != gVideoCurrentFrame && frame >= 0 &&
+					frame < gVideoTotalFrames)
+					get_video_frame(frame);
+			}
+
+			ImGui::SameLine();
+			if (ImGui::Button("|<")) get_video_frame(0);
+			ImGui::SameLine();
+			if (ImGui::Button("<"))
+				get_video_frame(std::max(0, gVideoCurrentFrame - 1));
+			ImGui::SameLine();
+			if (ImGui::Button(">"))
+				get_video_frame(std::min(gVideoTotalFrames - 1, gVideoCurrentFrame + 1));
+			ImGui::SameLine();
+			if (ImGui::Button(">|"))
+				get_video_frame(gVideoTotalFrames - 1);
+			ImGui::SameLine();
+
+			int sec = (int)(gVideoCurrentFrame / gVideoFps);
+			int totalSec = (int)(gVideoDuration);
+			ImGui::Text("%02d:%02d / %02d:%02d (%.0f fps)",
+				sec / 60, sec % 60,
+				totalSec / 60, totalSec % 60,
+				gVideoFps);
+
+			ImGui::Separator();
+			if (ImGui::Button("Export video..."))
+				gWindowExport = true;
+		}
 
 		if (!gOptImagesDocked)
 		{
