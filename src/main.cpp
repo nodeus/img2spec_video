@@ -1097,14 +1097,13 @@ void start_video_export()
 
 	STARTUPINFOA si = {0};
 	si.cb = sizeof(si);
-	si.dwFlags = STARTF_USESTDHANDLES;
 	PROCESS_INFORMATION pi = {0};
 
 	gExportRunning = 1;
 	gVideoExportProgress = 0.0f;
 
 	if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-		DETACHED_PROCESS, NULL, NULL, &si, &pi))
+		0, NULL, NULL, &si, &pi))
 	{
 		gExportRunning = 0;
 		printf("Export: CreateProcess failed (error %d)\n", GetLastError());
