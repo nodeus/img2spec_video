@@ -998,7 +998,11 @@ void start_video_export()
 		strcpy(gOptExportFilename, "output_smzd.mp4");
 
 #ifdef _WIN32
-	char cmd[8192];
+	// Get full path to this executable (has --pipe support)
+	char exePath[MAX_PATH];
+	GetModuleFileNameA(NULL, exePath, MAX_PATH);
+
+	char cmd[16384];
 	// ffmpeg → rawvideo → img2spec --pipe → rawvideo → ffmpeg → output
 	sprintf(cmd,
 		"ffmpeg -loglevel error -i \"%s\" "
@@ -1012,7 +1016,7 @@ void start_video_export()
 		gVideoFilename,
 		gDevice->mXRes, gDevice->mYRes,
 		gDevice->mXRes, gDevice->mYRes,
-		"img2spec",
+		exePath,
 		gDevice->mXRes, gDevice->mYRes,
 		gVideoFps,
 		gOptExportScale, gOptExportScale);
@@ -1038,28 +1042,36 @@ void start_video_export()
 		break;
 	}
 
-	// Create a batch file for the export command
+	// Write batch file (needed for cmd.exe pipeline with |)
 	char batchPath[MAX_PATH];
 	GetTempPathA(MAX_PATH, batchPath);
 	strcat(batchPath, "img2spec_export.bat");
 
 	FILE *f = fopen(batchPath, "w");
-	fprintf(f, "@echo off\n%s\n", cmd);
+	fprintf(f, "%s\n", cmd);
 	fclose(f);
 
-	// Start the batch file non-blocking
+	// Run batch file via cmd.exe (CREATE_NO_WINDOW = no console window)
+	char cmdline[MAX_PATH + 32];
+	sprintf(cmdline, "cmd.exe /c \"%s\"", batchPath);
+
 	STARTUPINFOA si = {0};
 	si.cb = sizeof(si);
 	si.dwFlags = STARTF_USESTDHANDLES;
+	PROCESS_INFORMATION pi = {0};
 
 	gExportRunning = 1;
 	gVideoExportProgress = 0.0f;
 
-	if (!CreateProcessA(NULL, batchPath, NULL, NULL, FALSE,
-		CREATE_NO_WINDOW, NULL, NULL, &si, &gExportProc))
+	if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
+		CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
 	{
 		gExportRunning = 0;
-		printf("Export: CreateProcess failed\n");
+		printf("Export: CreateProcess failed (error %d)\n", GetLastError());
+	}
+	else
+	{
+		gExportProc = pi;
 	}
 #endif
 }
