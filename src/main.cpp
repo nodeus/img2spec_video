@@ -1136,15 +1136,21 @@ void poll_video_export()
 		CloseHandle(gExportProc.hProcess);
 		CloseHandle(gExportProc.hThread);
 
-		// Audio remux
-		char cmd[4096];
-		sprintf(cmd,
-			"ffmpeg -loglevel error -i \"%s\" -i \"%s\" "
+		// Audio remux (no console window)
+		char remuxCmd[8192];
+		sprintf(remuxCmd,
+			"cmd.exe /c ffmpeg -loglevel error -i \"%s\" -i \"%s\" "
 			"-c:v copy -c:a aac -map 0:v:0 -map 1:a:0 -y \"%s_tmp.mp4\" "
 			"&& move /Y \"%s_tmp.mp4\" \"%s\"",
 			gOptExportFilename, gVideoFilename,
 			gOptExportFilename, gOptExportFilename, gOptExportFilename);
-		system(cmd);
+		STARTUPINFOA si2 = {0}; si2.cb = sizeof(si2);
+		PROCESS_INFORMATION pi2 = {0};
+		CreateProcessA(NULL, remuxCmd, NULL, NULL, FALSE,
+			CREATE_NO_WINDOW, NULL, NULL, &si2, &pi2);
+		WaitForSingleObject(pi2.hProcess, INFINITE);
+		CloseHandle(pi2.hProcess);
+		CloseHandle(pi2.hThread);
 
 		printf("Export complete: %s\n", gOptExportFilename);
 	}
