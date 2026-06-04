@@ -1963,14 +1963,12 @@ int main(int aParamc, char**aParams)
 				loadimg(gSourceImageName);
 		}
 
-		if (gDirtyPic && gSourceImageData)
+		if (gDirtyPic && !gVideoMode)
 		{
-			loadimg(gSourceImageName);
-		}
-
-		if (gDirtyPic && !gSourceImageData)
-		{
-			generateimg();
+			if (gSourceImageData)
+				loadimg(gSourceImageName);
+			else
+				generateimg();
 		}
 
 		if (gVideoExportActive)
