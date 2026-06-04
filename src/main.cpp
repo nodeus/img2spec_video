@@ -999,7 +999,12 @@ static int gExportRunning = 0;
 void start_video_export()
 {
 	if (gOptExportFilename[0] == 0)
-		strcpy(gOptExportFilename, "output_smzd.mp4");
+	{
+		strcpy(gOptExportFilename, gVideoFilename);
+		char *dot = strrchr(gOptExportFilename, '.');
+		if (dot) *dot = 0;
+		strcat(gOptExportFilename, "_spmz.mp4");
+	}
 
 #ifdef _WIN32
 	// Get full path to this executable (has --pipe support)
@@ -1895,9 +1900,16 @@ int main(int aParamc, char**aParams)
 				totalSec / 60, totalSec % 60,
 				gVideoFps);
 
-			ImGui::Separator();
-			if (ImGui::Button("Export video..."))
-				gWindowExport = true;
+		ImGui::Separator();
+		if (ImGui::Button("Export video..."))
+		{
+			// Set default output filename from input video
+			strcpy(gOptExportFilename, gVideoFilename);
+			char *dot = strrchr(gOptExportFilename, '.');
+			if (dot) *dot = 0;
+			strcat(gOptExportFilename, "_spmz.mp4");
+			gWindowExport = true;
+		}
 		}
 
 		if (!gOptImagesDocked)
