@@ -892,48 +892,54 @@ void get_video_frame(int frameNum)
 	if (gVideoWidth == 0 || gVideoHeight == 0) return;
 
 	double sec = (double)frameNum / gVideoFps;
-	int w = gDevice->mXRes;
-	int h = gDevice->mYRes;
-	int pixels = w * h;
+	int vw = gVideoWidth;
+	int vh = gVideoHeight;
 
 	char cmd[4096];
 #ifdef _WIN32
 	sprintf(cmd,
 		"ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 "
-		"-vf \"scale=%d:%d:force_original_aspect_ratio=decrease,"
-		"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black\" -v quiet -",
-		sec, gVideoFilename, w, h, w, h);
+		"-s %dx%d -v quiet -",
+		sec, gVideoFilename, vw, vh);
 	FILE *pipe = _popen(cmd, "rb");
 #else
 	sprintf(cmd,
 		"ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 "
-		"-vf \"scale=%d:%d:force_original_aspect_ratio=decrease,"
-		"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black\" -v quiet -",
-		sec, gVideoFilename, w, h, w, h);
+		"-s %dx%d -v quiet -",
+		sec, gVideoFilename, vw, vh);
 	FILE *pipe = popen(cmd, "r");
 #endif
 	if (!pipe) return;
 
-	unsigned char *buf = new unsigned char[pixels * 3];
-	size_t read = fread(buf, 1, pixels * 3, pipe);
+	unsigned char *buf = new unsigned char[vw * vh * 3];
+	size_t read = fread(buf, 1, vw * vh * 3, pipe);
 #ifdef _WIN32
 	_pclose(pipe);
 #else
 	pclose(pipe);
 #endif
 
-	if (read != (size_t)(pixels * 3))
+	if (read != (size_t)(vw * vh * 3))
 	{
 		delete[] buf;
 		return;
 	}
 
-	for (int i = 0; i < pixels; i++)
+	// Copy frame into device buffer (centered, clipped — same as loadimg)
+	for (int y = 0; y < gDevice->mYRes; y++)
 	{
-		int r = buf[i * 3 + 0];
-		int g = buf[i * 3 + 1];
-		int b = buf[i * 3 + 2];
-		gBitmapOrig[i] = r | (g << 8) | (b << 16) | 0xff000000;
+		for (int x = 0; x < gDevice->mXRes; x++)
+		{
+			int pix = 0xff000000;
+			if (x < vw && y < vh)
+			{
+				int r = buf[(y * vw + x) * 3 + 0];
+				int g = buf[(y * vw + x) * 3 + 1];
+				int b = buf[(y * vw + x) * 3 + 2];
+				pix = r | (g << 8) | (b << 16) | 0xff000000;
+			}
+			gBitmapOrig[y * gDevice->mXRes + x] = pix;
+		}
 	}
 
 	delete[] buf;
