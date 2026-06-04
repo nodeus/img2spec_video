@@ -979,6 +979,132 @@ void load_video(const char *filename)
 
 int pipe_mode = 0;
 
+#ifdef _WIN32
+#include <windows.h>
+static PROCESS_INFORMATION gExportProc;
+static HANDLE gExportStderrRead = NULL;
+static int gExportRunning = 0;
+#endif
+
+void start_video_export()
+{
+	if (gOptExportFilename[0] == 0)
+		strcpy(gOptExportFilename, "output_smzd.mp4");
+
+#ifdef _WIN32
+	char cmd[8192];
+	// ffmpeg → rawvideo → img2spec --pipe → rawvideo → ffmpeg → output
+	sprintf(cmd,
+		"ffmpeg -loglevel error -i \"%s\" -f rawvideo -pix_fmt rgb24 -s %dx%d - | "
+		"\"%s\" --pipe | "
+		"ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d "
+		"-framerate %.2f -i - "
+		"-vf \"scale=iw*%d:ih*%d:flags=neighbor\" ",
+		gVideoFilename,
+		gDevice->mXRes, gDevice->mYRes,
+		// Note: using the same executable path — needs GetModuleFileName for robustness
+		"img2spec",
+		gDevice->mXRes, gDevice->mYRes,
+		gVideoFps,
+		gOptExportScale, gOptExportScale);
+
+	// Encoder-specific args
+	switch (gOptExportEncoder)
+	{
+	case 0: // NVIDIA NVENC
+		sprintf(cmd + strlen(cmd),
+			"-c:v hevc_nvenc -profile:v main10 -pix_fmt yuv420p "
+			"-preset fast -rc constqp -qp %d -init_qpB 2 \"%s\"",
+			gOptExportQuality, gOptExportFilename);
+		break;
+	case 1: // AMD AMF
+		sprintf(cmd + strlen(cmd),
+			"-c:v hevc_amf -rc cqp -qp_p %d -qp_i %d -pix_fmt yuv420p \"%s\"",
+			gOptExportQuality, gOptExportQuality, gOptExportFilename);
+		break;
+	default: // CPU x264
+		sprintf(cmd + strlen(cmd),
+			"-c:v libx264 -crf %d -pix_fmt yuv420p \"%s\"",
+			gOptExportQuality, gOptExportFilename);
+		break;
+	}
+
+	// Create a batch file for the export command
+	char batchPath[MAX_PATH];
+	GetTempPathA(MAX_PATH, batchPath);
+	strcat(batchPath, "img2spec_export.bat");
+
+	FILE *f = fopen(batchPath, "w");
+	fprintf(f, "@echo off\n%s\n", cmd);
+	fclose(f);
+
+	// Start the batch file non-blocking
+	STARTUPINFOA si = {0};
+	si.cb = sizeof(si);
+	si.dwFlags = STARTF_USESTDHANDLES;
+
+	gExportRunning = 1;
+	gVideoExportProgress = 0.0f;
+
+	if (!CreateProcessA(NULL, batchPath, NULL, NULL, FALSE,
+		CREATE_NO_WINDOW, NULL, NULL, &si, &gExportProc))
+	{
+		gExportRunning = 0;
+		printf("Export: CreateProcess failed\n");
+	}
+#endif
+}
+
+void poll_video_export()
+{
+#ifdef _WIN32
+	if (!gExportRunning) return;
+
+	DWORD exitCode;
+	if (GetExitCodeProcess(gExportProc.hProcess, &exitCode) && exitCode == STILL_ACTIVE)
+	{
+		// Still running — update progress estimate based on frame position
+		// (no accurate progress without parsing ffmpeg stderr)
+		gVideoExportProgress = (float)gVideoCurrentFrame / (float)gVideoTotalFrames;
+	}
+	else
+	{
+		// Done
+		gExportRunning = 0;
+		gVideoExportProgress = 1.0f;
+		gVideoExportActive = false;
+		CloseHandle(gExportProc.hProcess);
+		CloseHandle(gExportProc.hThread);
+
+		// Audio remux
+		char cmd[4096];
+		sprintf(cmd,
+			"ffmpeg -loglevel error -i \"%s\" -i \"%s\" "
+			"-c:v copy -c:a aac -map 0:v:0 -map 1:a:0 -y \"%s_tmp.mp4\" "
+			"&& move /Y \"%s_tmp.mp4\" \"%s\"",
+			gOptExportFilename, gVideoFilename,
+			gOptExportFilename, gOptExportFilename, gOptExportFilename);
+		system(cmd);
+
+		printf("Export complete: %s\n", gOptExportFilename);
+	}
+#endif
+}
+
+void cancel_video_export()
+{
+#ifdef _WIN32
+	if (gExportRunning)
+	{
+		TerminateProcess(gExportProc.hProcess, 1);
+		CloseHandle(gExportProc.hProcess);
+		CloseHandle(gExportProc.hThread);
+		gExportRunning = 0;
+		gVideoExportActive = false;
+	}
+#endif
+}
+
 void pipe_loop()
 {
 	int w = gDevice->mXRes;
@@ -1575,16 +1701,14 @@ int main(int aParamc, char**aParams)
 					int pct = (int)(gVideoExportProgress * 100);
 					ImGui::Text("Progress: %d%%", pct);
 					if (ImGui::Button("Cancel"))
-						gVideoExportActive = false;
+						cancel_video_export();
 				}
 				else
 				{
 					if (ImGui::Button("Start export"))
 					{
-						if (gOptExportFilename[0] == 0)
-							strcpy(gOptExportFilename, "output_smzd.mp4");
+						start_video_export();
 						gVideoExportActive = true;
-						gVideoExportProgress = 0.0f;
 					}
 				}
 			}
@@ -1734,6 +1858,9 @@ int main(int aParamc, char**aParams)
 		{
 			generateimg();
 		}
+
+		if (gVideoExportActive)
+			poll_video_export();
 
 		if (gDirty)
 		{
