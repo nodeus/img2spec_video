@@ -3,4 +3,5 @@ out/
 *.sdf
 *.opensdf
 build/
+imgui.ini
 build-w*
