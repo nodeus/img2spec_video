@@ -1002,21 +1002,57 @@ void start_video_export()
 	char exePath[MAX_PATH];
 	GetModuleFileNameA(NULL, exePath, MAX_PATH);
 
+	// Save current workspace (modifiers + device) to temp file
+	char workspacePath[MAX_PATH];
+	GetTempPathA(MAX_PATH, workspacePath);
+	strcat(workspacePath, "img2spec_export.isw");
+
+	build_applystack();
+	JSON_Value *root_value = json_value_init_object();
+	JSON_Object *root = json_value_get_object(root_value);
+	json_object_dotset_string(root, "About.WhatIsThis", "Image Spectrumizer " VERSION " workspace file");
+	json_object_dotset_string(root, "About.Magic", "0x50534D49");
+	json_object_dotset_number(root, "About.Version", 4);
+
+#define WRITECONFIG(x) json_object_dotset_number(root, "Config." #x, x);
+	WRITECONFIG(gDeviceId);
+#undef WRITECONFIG
+	json_object_dotset_string(root, "Device.Name", gDevice->getname());
+	gDevice->writeOptions(root);
+
+	Modifier *walker = gModifierApplyStack;
+	int number = 0;
+	while (walker)
+	{
+		char path[256], temp[256];
+		sprintf(path, "Stack.Item[%d]", number);
+		sprintf(temp, "%s.Name", path);
+		json_object_dotset_string(root, temp, walker->getname());
+		sprintf(temp, "%s.Type", path);
+		json_object_dotset_number(root, temp, walker->gettype());
+		JSON_Object *item = json_object_dotget_object(root, path);
+		walker->serialize_common(item);
+		walker->serialize(item);
+		walker = walker->mApplyNext;
+		number++;
+	}
+	json_serialize_to_file_pretty(root_value, workspacePath);
+	json_value_free(root_value);
+
 	char cmd[16384];
-	// ffmpeg → rawvideo → img2spec --pipe → rawvideo → ffmpeg → output
 	sprintf(cmd,
 		"ffmpeg -loglevel error -i \"%s\" "
 		"-vf \"scale=%d:%d:force_original_aspect_ratio=decrease,"
 		"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black\" "
 		"-f rawvideo -pix_fmt rgb24 - | "
-		"\"%s\" --pipe | "
+		"\"%s\" \"%s\" --pipe | "
 		"ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d "
 		"-framerate %.2f -i - "
 		"-vf \"scale=iw*%d:ih*%d:flags=neighbor\" ",
 		gVideoFilename,
 		gDevice->mXRes, gDevice->mYRes,
 		gDevice->mXRes, gDevice->mYRes,
-		exePath,
+		exePath, workspacePath,
 		gDevice->mXRes, gDevice->mYRes,
 		gVideoFps,
 		gOptExportScale, gOptExportScale);
@@ -1254,12 +1290,6 @@ int main(int aParamc, char**aParams)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	}
 
-	if (pipe_mode)
-	{
-		pipe_loop();
-		return 0;
-	}
-
 	bool done = false;
 
 	int commandline_export = 0;
@@ -1286,6 +1316,13 @@ int main(int aParamc, char**aParams)
 				loadworkspace(aParams[i]);
 			}
 		}
+	}
+
+	// --pipe mode: workspace loaded above, now enter pipe loop
+	if (pipe_mode)
+	{
+		pipe_loop();
+		return 0;
 	}
 
 	if (aParamc < commandline_export_fn)
