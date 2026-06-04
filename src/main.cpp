@@ -929,7 +929,7 @@ void get_video_frame(int frameNum)
 		int r = buf[i * 3 + 0];
 		int g = buf[i * 3 + 1];
 		int b = buf[i * 3 + 2];
-		gBitmapOrig[i] = 0xff000000 | (r << 16) | (g << 8) | b;
+		gBitmapOrig[i] = r | (g << 8) | (b << 16) | 0xff000000;
 	}
 
 	delete[] buf;
@@ -1128,7 +1128,7 @@ void pipe_loop()
 			int r = buf[i * 3 + 0];
 			int g = buf[i * 3 + 1];
 			int b = buf[i * 3 + 2];
-			gBitmapOrig[i] = 0xff000000 | (r << 16) | (g << 8) | b;
+			gBitmapOrig[i] = r | (g << 8) | (b << 16) | 0xff000000;
 		}
 
 		process_image();
