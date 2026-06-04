@@ -1956,7 +1956,7 @@ int main(int aParamc, char**aParams)
 		ImGui::EndChild();		
 		ImGui::End();
 
-		if (gOptTrackFile && gSourceImageData)
+		if (gOptTrackFile && !gVideoMode && gSourceImageName)
 		{
 			int fd = getFileDate(gSourceImageName);
 			if (fd != gSourceImageDate)
