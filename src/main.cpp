@@ -894,12 +894,18 @@ void get_video_frame(int frameNum)
 
 	char cmd[4096];
 #ifdef _WIN32
-	sprintf(cmd, "ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 -s %dx%d -v quiet -",
-		sec, gVideoFilename, w, h);
+	sprintf(cmd,
+		"ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 "
+		"-vf \"scale=%d:%d:force_original_aspect_ratio=decrease,"
+		"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black\" -v quiet -",
+		sec, gVideoFilename, w, h, w, h);
 	FILE *pipe = _popen(cmd, "rb");
 #else
-	sprintf(cmd, "ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 -s %dx%d -v quiet -",
-		sec, gVideoFilename, w, h);
+	sprintf(cmd,
+		"ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 "
+		"-vf \"scale=%d:%d:force_original_aspect_ratio=decrease,"
+		"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black\" -v quiet -",
+		sec, gVideoFilename, w, h, w, h);
 	FILE *pipe = popen(cmd, "r");
 #endif
 	if (!pipe) return;
@@ -995,14 +1001,17 @@ void start_video_export()
 	char cmd[8192];
 	// ffmpeg → rawvideo → img2spec --pipe → rawvideo → ffmpeg → output
 	sprintf(cmd,
-		"ffmpeg -loglevel error -i \"%s\" -f rawvideo -pix_fmt rgb24 -s %dx%d - | "
+		"ffmpeg -loglevel error -i \"%s\" "
+		"-vf \"scale=%d:%d:force_original_aspect_ratio=decrease,"
+		"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black\" "
+		"-f rawvideo -pix_fmt rgb24 - | "
 		"\"%s\" --pipe | "
 		"ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d "
 		"-framerate %.2f -i - "
 		"-vf \"scale=iw*%d:ih*%d:flags=neighbor\" ",
 		gVideoFilename,
 		gDevice->mXRes, gDevice->mYRes,
-		// Note: using the same executable path — needs GetModuleFileName for robustness
+		gDevice->mXRes, gDevice->mYRes,
 		"img2spec",
 		gDevice->mXRes, gDevice->mYRes,
 		gVideoFps,
