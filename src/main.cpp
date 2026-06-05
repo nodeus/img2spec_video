@@ -1134,7 +1134,7 @@ void start_video_export()
 
 	char cmd[16384];
 	_snprintf(cmd, sizeof(cmd) - 1,
-		"ffmpeg -loglevel info -i \"%s\" "
+		"ffmpeg -loglevel info -fflags nobuffer -i \"%s\" "
 		"-f rawvideo -pix_fmt rgb24 - | "
 		"\"%s\" \"%s\" --pipe --width %d --height %d 2>\"%s\\img2spec_diag.log\" | "
 		"ffmpeg -loglevel info -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -r %d/%d -i - "
@@ -1337,6 +1337,9 @@ void pipe_loop()
 	_setmode(_fileno(stdout), _O_BINARY);
 #endif
 
+	// Large buffer for stdout to batch pipe writes (fewer syscalls)
+	setvbuf(stdout, NULL, _IOFBF, 1024 * 1024);
+
 	// Use original resolution from --width/--height if provided, else device res
 	int sw = gPipeWidth > 0 ? gPipeWidth : dw;
 	int sh = gPipeHeight > 0 ? gPipeHeight : dh;
@@ -1399,7 +1402,6 @@ void pipe_loop()
 				0xff };
 			fwrite(rgba, 1, 4, stdout);
 		}
-		fflush(stdout);
 		frameCount++;
 	}
 	fprintf(stderr, "DIAG: pipe_loop() processed %d frames\n", frameCount);
