@@ -1160,10 +1160,10 @@ void start_video_export()
 	// Encoder-specific args
 	switch (gOptExportEncoder)
 	{
-	case 0: // NVIDIA NVENC
+		case 0: // NVIDIA NVENC
 		sprintf(cmd + strlen(cmd),
 			"-c:v hevc_nvenc -profile:v main -pix_fmt yuv420p "
-			"-preset fast -rc constqp -qp %d -init_qpB 2 \"%s\"",
+			"-preset fast -rc constqp -qp %d \"%s\"",
 			gOptExportQuality, exportAbsPath);
 		break;
 	case 1: // AMD AMF
@@ -1352,9 +1352,9 @@ void pipe_loop()
 	_setmode(_fileno(stdout), _O_BINARY);
 #endif
 
-	// Large buffer for stdout to batch pipe writes (fewer syscalls)
+	// Large buffer for stdin (read frames from decoder), unbuffered stdout (steady flow to encoder)
 	setvbuf(stdin, NULL, _IOFBF, 16 * 1024 * 1024);
-	setvbuf(stdout, NULL, _IOFBF, 16 * 1024 * 1024);
+	setvbuf(stdout, NULL, _IONBF, 0);
 
 	// Use original resolution from --width/--height if provided, else device res
 	int sw = gPipeWidth > 0 ? gPipeWidth : dw;
