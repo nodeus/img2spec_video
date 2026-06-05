@@ -1352,9 +1352,8 @@ void pipe_loop()
 	_setmode(_fileno(stdout), _O_BINARY);
 #endif
 
-	// Large buffer for stdin (read frames from decoder), unbuffered stdout (steady flow to encoder)
+	// Large buffer for stdin (read frames from decoder), default stdout (fflush per frame)
 	setvbuf(stdin, NULL, _IOFBF, 16 * 1024 * 1024);
-	setvbuf(stdout, NULL, _IONBF, 0);
 
 	// Use original resolution from --width/--height if provided, else device res
 	int sw = gPipeWidth > 0 ? gPipeWidth : dw;
@@ -1362,6 +1361,7 @@ void pipe_loop()
 	int spixels = sw * sh;
 
 	unsigned char *buf = new unsigned char[spixels * 3];
+	unsigned char *frame_out = new unsigned char[dpixels * 4];
 	int frameCount = 0;
 	while (fread(buf, 1, spixels * 3, stdin) == (size_t)(spixels * 3))
 	{
@@ -1408,18 +1408,20 @@ void pipe_loop()
 		gDirty = 0;
 		gDirtyPic = 0;
 
+		// Build RGBA output buffer: one fwrite + fflush per frame
 		for (int i = 0; i < dpixels; i++)
 		{
 			unsigned int c = gBitmapSpec[i];
-			unsigned char rgba[4] = {
-				(unsigned char)(c & 0xff),
-				(unsigned char)((c >> 8) & 0xff),
-				(unsigned char)((c >> 16) & 0xff),
-				0xff };
-			fwrite(rgba, 1, 4, stdout);
+			frame_out[i * 4 + 0] = (unsigned char)(c & 0xff);
+			frame_out[i * 4 + 1] = (unsigned char)((c >> 8) & 0xff);
+			frame_out[i * 4 + 2] = (unsigned char)((c >> 16) & 0xff);
+			frame_out[i * 4 + 3] = 0xff;
 		}
+		fwrite(frame_out, 1, dpixels * 4, stdout);
+		fflush(stdout);
 		frameCount++;
 	}
+	delete[] frame_out;
 	fprintf(stderr, "DIAG: pipe_loop() processed %d frames\n", frameCount);
 	delete[] buf;
 }
