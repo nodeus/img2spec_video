@@ -58,7 +58,7 @@ Still, if you find it useful, great!
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize.h"
 
-#define VERSION "5.1"
+#define VERSION "5.2"
 
 #define SERIALIZE(x) json_object_dotset_number(root, #x, x);
 #define DESERIALIZE(x) if (json_object_dotget_value(root, #x) != NULL) x = json_object_dotget_number(root, #x);
@@ -121,6 +121,8 @@ int gOptExportEncoder = 0;
 int gOptExportQuality = 17;
 char gOptExportFilename[1024] = "";
 char gOptExportExtraParams[1024] = "";
+int gOptExportLoglevel = 0;  // 0=info, 1=error, 2=warning, 3=verbose, 4=debug
+bool gOptExportCleanup = true;
 
 int gPipeWidth = 0;   // --width for --pipe mode
 int gPipeHeight = 0;  // --height for --pipe mode
@@ -1067,6 +1069,7 @@ int pipe_mode = 0;
 static PROCESS_INFORMATION gExportProc;
 static HANDLE gExportStderrRead = NULL;
 static int gExportRunning = 0;
+static long gExportLogPos = 0;
 #endif
 
 void start_video_export()
@@ -1139,18 +1142,31 @@ void start_video_export()
 	else
 		_snprintf(fpsStr, sizeof(fpsStr), "%d/%d", gVideoFpsNum, gVideoFpsDen);
 
+	static const char *loglevel_names[] = {"info", "error", "warning", "verbose", "debug"};
+	int loglevel_idx = gOptExportLoglevel;
+	if (loglevel_idx < 0 || loglevel_idx > 4) loglevel_idx = 0;
+	const char *loglevelStr = loglevel_names[loglevel_idx];
+
+	char progressPath[MAX_PATH + 32];
+	_snprintf(progressPath, MAX_PATH + 32, "%s\\img2spec_export_progress.txt", tempDir);
+	FILE *pf = fopen(progressPath, "w");
+	if (pf) fclose(pf);
+
 	char cmd[16384];
 	_snprintf(cmd, sizeof(cmd) - 1,
-		"ffmpeg -loglevel info -i \"%s\" "
+		"ffmpeg -loglevel %s -i \"%s\" "
 		"-f rawvideo -pix_fmt rgb24 - | "
 		"\"%s\" \"%s\" --pipe --width %d --height %d | "
-		"ffmpeg -loglevel info -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -framerate %s -i - "
-		"-vf \"scale=iw*%d:-1:flags=neighbor\" ",
-		gVideoFilename,
+		"ffmpeg -loglevel %s -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -framerate %s -i -"
+		" -progress \"%s\""
+		" -vf \"scale=iw*%d:-1:flags=neighbor\" ",
+		loglevelStr, gVideoFilename,
 		exePath, workspacePath,
 		gVideoWidth, gVideoHeight,
+		loglevelStr,
 		gDevice->mXRes, gDevice->mYRes,
 		fpsStr,
+		progressPath,
 		gOptExportScale);
 
 	// User extra params
@@ -1206,6 +1222,7 @@ void start_video_export()
 	gExportRunning = 1;
 	gVideoExportProgress = 0.0f;
 	gVideoExportActive = true;
+	gExportLogPos = 0;
 
 	if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
 		CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
@@ -1230,9 +1247,46 @@ void poll_video_export()
 	DWORD exitCode;
 	if (GetExitCodeProcess(gExportProc.hProcess, &exitCode) && exitCode == STILL_ACTIVE)
 	{
-		// Still running — update progress estimate based on frame position
-		// (no accurate progress without parsing ffmpeg stderr)
-		gVideoExportProgress = (float)gVideoCurrentFrame / (float)gVideoTotalFrames;
+		// Read ffmpeg -progress file to extract real progress
+		char progPath[MAX_PATH + 32];
+		_snprintf(progPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_progress.txt", gStartupCwd);
+
+		FILE *pf = fopen(progPath, "r");
+		if (pf)
+		{
+			fseek(pf, gExportLogPos, SEEK_SET);
+			char line[512];
+			while (fgets(line, sizeof(line), pf))
+			{
+				char *t = strstr(line, "out_time=");
+				if (t)
+				{
+					int h, m;
+					double s;
+					if (sscanf(t, "out_time=%d:%d:%lf", &h, &m, &s) >= 3)
+					{
+						double secs = h * 3600.0 + m * 60.0 + s;
+						if (gVideoDuration > 0.0)
+						{
+							float p = (float)(secs / gVideoDuration);
+							if (p > 1.0f) p = 1.0f;
+							gVideoExportProgress = p;
+						}
+					}
+					else if (sscanf(t, "out_time=%lf", &s) >= 1)
+					{
+						if (gVideoDuration > 0.0)
+						{
+							float p = (float)(s / gVideoDuration);
+							if (p > 1.0f) p = 1.0f;
+							gVideoExportProgress = p;
+						}
+					}
+				}
+			}
+			gExportLogPos = ftell(pf);
+			fclose(pf);
+		}
 	}
 	else
 	{
@@ -1276,11 +1330,16 @@ void poll_video_export()
 			_snprintf(tmpAbsPath, MAX_PATH, "%s\\%s_tmp.mp4", gStartupCwd, gOptExportFilename);
 
 			// Audio remux (no console window)
+			static const char *rlognames[] = {"info", "error", "warning", "verbose", "debug"};
+			int ridx = gOptExportLoglevel;
+			if (ridx < 0 || ridx > 4) ridx = 0;
+			const char *rlog = rlognames[ridx];
 			char remuxCmd[8192];
 			_snprintf(remuxCmd, sizeof(remuxCmd),
-				"cmd.exe /c ffmpeg -loglevel info -i \"%s\" -i \"%s\" "
+				"cmd.exe /c ffmpeg -loglevel %s -i \"%s\" -i \"%s\" "
 				"-c:v copy -c:a aac -map 0:v:0 -map 1:a:0 -y \"%s\""
 				"&& move /Y \"%s\" \"%s\"",
+				rlog,
 				exportAbsPath, gVideoFilename,
 				tmpAbsPath, tmpAbsPath, exportAbsPath);
 
@@ -1307,6 +1366,19 @@ void poll_video_export()
 			{
 				printf("Export: audio remux CreateProcess failed (error %d), video saved without audio\n", GetLastError());
 			}
+		}
+
+		if (gOptExportCleanup)
+		{
+			char delPath[MAX_PATH + 32];
+			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_progress.txt", gStartupCwd);
+			DeleteFileA(delPath);
+			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export.bat", gStartupCwd);
+			DeleteFileA(delPath);
+			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export.isw", gStartupCwd);
+			DeleteFileA(delPath);
+			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_stderr.log", gStartupCwd);
+			DeleteFileA(delPath);
 		}
 
 		gVideoExportProgress = 1.0f;
@@ -1431,6 +1503,15 @@ int main(int aParamc, char**aParams)
 	GetCurrentDirectoryA(MAX_PATH, gStartupCwd);
 
 	gDevice = new ZXSpectrumDevice;
+
+	// Auto-load conv.isw if present in startup directory
+	char convPath[MAX_PATH];
+	_snprintf(convPath, MAX_PATH, "%s\\conv.isw", gStartupCwd);
+	if (GetFileAttributesA(convPath) != INVALID_FILE_ATTRIBUTES)
+	{
+		fprintf(stderr, "DIAG: main() auto-loading '%s'\n", convPath);
+		loadworkspace(convPath);
+	}
 
 	// Pre-scan: detect --pipe mode
 	pipe_mode = 0;
@@ -1995,6 +2076,9 @@ int main(int aParamc, char**aParams)
 				ImGui::SliderInt("Quality (CRF/QP)", &gOptExportQuality, 0, 51);
 				ImGui::SliderInt("Scale", &gOptExportScale, 1, 32);
 				ImGui::InputText("Extra ffmpeg params", gOptExportExtraParams, 1024);
+				ImGui::Combo("ffmpeg loglevel", &gOptExportLoglevel,
+					"info\0error\0warning\0verbose\0debug\0");
+				ImGui::Checkbox("Cleanup temporary files", &gOptExportCleanup);
 				const char *encoders[] = {"NVENC", "AMF", "x264"};
 				ImGui::Text("Settings: %s | x%d | Q%d",
 					encoders[gOptExportEncoder],
