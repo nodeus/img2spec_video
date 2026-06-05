@@ -117,6 +117,7 @@ int gOptExportScale = 8;
 int gOptExportEncoder = 0;
 int gOptExportQuality = 17;
 char gOptExportFilename[1024] = "";
+char gOptExportExtraParams[1024] = "";
 
 int gPipeWidth = 0;   // --width for --pipe mode
 int gPipeHeight = 0;  // --height for --pipe mode
@@ -1043,8 +1044,8 @@ void start_video_export()
 
 	// Save current workspace (modifiers + device) to temp file
 	char workspacePath[MAX_PATH];
-	GetTempPathA(MAX_PATH, workspacePath);
-	strcat(workspacePath, "img2spec_export.isw");
+	GetCurrentDirectoryA(MAX_PATH, workspacePath);
+	strcat(workspacePath, "\\img2spec_export.isw");
 
 	build_applystack();
 	JSON_Value *root_value = json_value_init_object();
@@ -1078,21 +1079,23 @@ void start_video_export()
 	json_serialize_to_file_pretty(root_value, workspacePath);
 	json_value_free(root_value);
 
-	int outW = gDevice->mXRes * gOptExportScale;
-	int outH = gDevice->mYRes * gOptExportScale;
 	char cmd[16384];
 	sprintf(cmd,
 		"ffmpeg -loglevel error -i \"%s\" "
 		"-f rawvideo -pix_fmt rgb24 - | "
 		"\"%s\" \"%s\" --pipe --width %d --height %d | "
-		"ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d -r %d -i - "
-		"-vf scale=%d:%d ",
+		"ffmpeg -loglevel error -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -r %d -i - "
+		"-vf \"scale=iw*%d:-1:flags=neighbor\" ",
 		gVideoFilename,
 		exePath, workspacePath,
 		gVideoWidth, gVideoHeight,
 		gDevice->mXRes, gDevice->mYRes,
 		(int)gVideoFps,
-		outW, outH);
+		gOptExportScale);
+
+	// User extra params
+	if (gOptExportExtraParams[0])
+		sprintf(cmd + strlen(cmd), "%s ", gOptExportExtraParams);
 
 	// Encoder-specific args
 	switch (gOptExportEncoder)
@@ -1117,8 +1120,8 @@ void start_video_export()
 
 	// Write batch file (needed for cmd.exe pipeline with |)
 	char batchPath[MAX_PATH];
-	GetTempPathA(MAX_PATH, batchPath);
-	strcat(batchPath, "img2spec_export.bat");
+	GetCurrentDirectoryA(MAX_PATH, batchPath);
+	strcat(batchPath, "\\img2spec_export.bat");
 
 	FILE *f = fopen(batchPath, "w");
 	fprintf(f, "%s\n", cmd);
@@ -1840,6 +1843,7 @@ int main(int aParamc, char**aParams)
 					"NVIDIA NVENC\0AMD AMF\0CPU x264\0");
 				ImGui::SliderInt("Quality (CRF/QP)", &gOptExportQuality, 0, 51);
 				ImGui::SliderInt("Scale", &gOptExportScale, 1, 32);
+				ImGui::InputText("Extra ffmpeg params", gOptExportExtraParams, 1024);
 				const char *encoders[] = {"NVENC", "AMF", "x264"};
 				ImGui::Text("Settings: %s | x%d | Q%d",
 					encoders[gOptExportEncoder],
