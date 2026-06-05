@@ -1163,7 +1163,7 @@ void start_video_export()
 		case 0: // NVIDIA NVENC
 		sprintf(cmd + strlen(cmd),
 			"-c:v hevc_nvenc -profile:v main -pix_fmt yuv420p "
-			"-preset fast -rc constqp -qp %d \"%s\"",
+			"-preset fast -movflags +faststart -rc constqp -qp %d \"%s\"",
 			gOptExportQuality, exportAbsPath);
 		break;
 	case 1: // AMD AMF
