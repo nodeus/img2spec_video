@@ -893,6 +893,9 @@ char *run_pipe(const char *cmd)
 
 void get_video_frame(int frameNum)
 {
+	gDirty = 1;
+	gDirtyPic = 1;
+
 	if (gVideoWidth == 0 || gVideoHeight == 0) return;
 
 	double sec = (double)frameNum / gVideoFps;
@@ -966,8 +969,9 @@ void get_video_frame(int frameNum)
 
 	delete[] buf;
 	gVideoCurrentFrame = frameNum;
-	gDirty = 1;
-	gDirtyPic = 1; // triggers ScalePosModifier to re-scale from gSourceImageData
+
+	// Update Original texture so the window shows the current scrubbed frame
+	update_texture(gTextureOrig, gBitmapOrig);
 }
 
 void load_video(const char *filename)
