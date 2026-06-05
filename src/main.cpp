@@ -1172,19 +1172,37 @@ void start_video_export()
 	}
 
 	// Write batch file (needed for cmd.exe pipeline with |)
+	// Redirect each process's stderr to a log file (cmd.exe /c parsing of 2> is unreliable)
+	char logPath[MAX_PATH + 32];
+	_snprintf(logPath, MAX_PATH + 32, "%s\\img2spec_export_stderr.log", tempDir);
+
 	char batchPath[MAX_PATH];
 	_snprintf(batchPath, MAX_PATH, "%s\\img2spec_export.bat", tempDir);
 
 	FILE *f = fopen(batchPath, "w");
-	fprintf(f, "%s\n", cmd);
+	fprintf(f, "@echo off\n");
+	fprintf(f, "type nul > \"%s\"\n", logPath);
+	// Insert 2>>"log" before each | in the pipeline
+	char *p = cmd;
+	while (*p)
+	{
+		if (p[0] == ' ' && p[1] == '|' && p[2] == ' ')
+		{
+			fprintf(f, " 2>>\"%s\" |", logPath);
+			p += 3;
+		}
+		else
+		{
+			fputc(*p, f);
+			p++;
+		}
+	}
+	fprintf(f, " 2>>\"%s\"\n", logPath);
 	fclose(f);
 
 	// Run batch file via cmd.exe (CREATE_NO_WINDOW = no console window)
-	// Redirect all stderr (ffmpeg + img2spec) to log file for diagnostics
-	char cmdline[MAX_PATH + 64];
-	_snprintf(cmdline, sizeof(cmdline) - 1,
-		"cmd.exe /c \"%s\" 2>\"%s\\img2spec_export_stderr.log\"",
-		batchPath, tempDir);
+	char cmdline[MAX_PATH + 32];
+	sprintf(cmdline, "cmd.exe /c \"%s\"", batchPath);
 
 	STARTUPINFOA si = {0};
 	si.cb = sizeof(si);
