@@ -1182,6 +1182,7 @@ void start_video_export()
 	FILE *f = fopen(batchPath, "w");
 	fprintf(f, "@echo off\n");
 	fprintf(f, "type nul > \"%s\"\n", logPath);
+	fprintf(f, "echo Before pipe >&2\n");
 	// Insert 2>>"log" before each | in the pipeline
 	char *p = cmd;
 	while (*p)
@@ -1198,6 +1199,7 @@ void start_video_export()
 		}
 	}
 	fprintf(f, " 2>>\"%s\"\n", logPath);
+	fprintf(f, "echo After pipe >&2\n");
 	fclose(f);
 
 	// Run batch file via cmd.exe (CREATE_NO_WINDOW = no console window)
@@ -1213,7 +1215,7 @@ void start_video_export()
 	gVideoExportActive = true;
 
 	if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-		0, NULL, NULL, &si, &pi))
+		CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
 	{
 		gExportRunning = 0;
 		gVideoExportProgress = 0.0f;
