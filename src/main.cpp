@@ -1338,7 +1338,8 @@ void pipe_loop()
 #endif
 
 	// Large buffer for stdout to batch pipe writes (fewer syscalls)
-	setvbuf(stdout, NULL, _IOFBF, 1024 * 1024);
+	setvbuf(stdin, NULL, _IOFBF, 16 * 1024 * 1024);
+	setvbuf(stdout, NULL, _IOFBF, 16 * 1024 * 1024);
 
 	// Use original resolution from --width/--height if provided, else device res
 	int sw = gPipeWidth > 0 ? gPipeWidth : dw;
