@@ -1,4 +1,4 @@
-# Image Spectrumizer 5.0
+# Image Spectrumizer 5.2
 
 ![ScreenShot](https://raw.github.com/jarikomppa/img2spec/master/img2spec2.jpg)
 
@@ -16,6 +16,13 @@ Originally by Jari Komppa — extended with video mode, pipe processing, and CLI
 - Interactive preview with instant feedback
 - Save as PNG, raw binary, C header (`.h`), assembler include (`.inc`), or SCR (`.scr`)
 - Workspace save/load for non-destructive editing
+
+### New in 5.2 — Export Progress & UX
+
+- **Real-time export progress** — progress bar updates during video export via ffmpeg `-progress`, works with any loglevel setting
+- **Configurable ffmpeg loglevel** — choose info/error/warning/verbose/debug in Export panel to control log verbosity
+- **Auto-load `conv.isw`** — automatically loads `conv.isw` from startup directory if present
+- **Cleanup temporary files** — checkbox to auto-delete temp files after export (enabled by default)
 
 ### New in 5.0 — Video Mode
 - **Load video files** — MP4, MOV, AVI, etc. via ffmpeg

@@ -1,5 +1,21 @@
 # Changelog
 
+## 5.2 — Export Progress & UX Improvements
+
+### New Features
+
+- **Real-time export progress** — progress bar now reads `out_time=` from ffmpeg's `-progress` file, showing actual encoding progress (works at any loglevel, even `error` or `quiet`)
+- **Configurable ffmpeg loglevel** — dropdown selector in Export panel lets you choose between `info`, `error`, `warning`, `verbose`, `debug` to control log verbosity
+- **Auto-load `conv.isw`** — if `conv.isw` exists in the startup directory, it is automatically loaded on launch (useful for `--pipe` mode workflows)
+- **Cleanup temporary files checkbox** — toggle to auto-delete temp files (`.bat`, `.isw`, `.log`, `_progress.txt`) after export completes, enabled by default
+
+### Improvements
+
+- **`-progress` file** — ffmpeg now writes machine-readable progress to `temp/img2spec_export_progress.txt` independently of loglevel
+- **Progress fallback** — parses both `HH:MM:SS.xxxxxx` and numeric (seconds) formats from `-progress` output
+
+---
+
 ## 5.1 — Export Pipeline Fixes
 
 ### Bug Fixes
