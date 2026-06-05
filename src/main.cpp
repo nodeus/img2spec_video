@@ -391,11 +391,15 @@ void loadworkspace(char *aFilename = nullptr)
 
 	if (FileName)
 	{
+		fprintf(stderr, "DIAG: loadworkspace() loading '%s'\n", FileName);
 
 		JSON_Value *root_value = json_parse_file(FileName);
 		if (root_value)
 		{
 			JSON_Object *root = json_value_get_object(root_value);
+			fprintf(stderr, "DIAG: loadworkspace() JSON OK, magic=%s ver=%.0f\n",
+				json_object_dotget_string(root, "About.Magic") ? json_object_dotget_string(root, "About.Magic") : "NULL",
+				json_object_dotget_number(root, "About.Version"));
 			if (_stricmp(json_object_dotget_string(root, "About.Magic"), "0x50534D49") == 0 &&
 				json_object_dotget_number(root, "About.Version") == 4)
 			{
@@ -462,6 +466,7 @@ void loadworkspace(char *aFilename = nullptr)
 					if (json_object_get_value(item, "Type"))
 					{
 						m = (int)json_object_get_number(item, "Type");
+						fprintf(stderr, "DIAG: loadworkspace() modifier[%d] type=%d\n", number, m);
 						
 						Modifier *n = 0;
 						switch (m)
@@ -481,6 +486,7 @@ void loadworkspace(char *aFilename = nullptr)
 						case MOD_SUPERBLACK: n = new SuperblackModifier; break;
 						case MOD_CURVE: n = new CurveModifier; break;
 						default:
+							fprintf(stderr, "DIAG: loadworkspace() unknown modifier type %d\n", m);
 							json_value_free(root_value);
 							return;
 						}
@@ -492,9 +498,22 @@ void loadworkspace(char *aFilename = nullptr)
 					sprintf(path, "Stack.Item[%d]", number);
 					item = json_object_dotget_object(root, path);
 				}
+				fprintf(stderr, "DIAG: loadworkspace() loaded %d modifiers, deviceId=%d\n", number, gDeviceId);
+			}
+			else
+			{
+				fprintf(stderr, "DIAG: loadworkspace() magic/version check failed\n");
 			}
 			json_value_free(root_value);
 		}
+		else
+		{
+			fprintf(stderr, "DIAG: loadworkspace() json_parse_file failed\n");
+		}
+	}
+	else
+	{
+		fprintf(stderr, "DIAG: loadworkspace() FileName is NULL\n");
 	}
 }
 
@@ -1091,6 +1110,7 @@ void start_video_export()
 		walker = walker->mApplyNext;
 		number++;
 	}
+	fprintf(stderr, "DIAG: start_video_export() workspace=%s modifiers=%d\n", workspacePath, number);
 	json_serialize_to_file_pretty(root_value, workspacePath);
 	json_value_free(root_value);
 
@@ -1098,15 +1118,16 @@ void start_video_export()
 	_snprintf(exportAbsPath, MAX_PATH, "%s\\%s", gStartupCwd, gOptExportFilename);
 
 	char cmd[16384];
-	sprintf(cmd,
-		"ffmpeg -loglevel error -i \"%s\" "
+	_snprintf(cmd, sizeof(cmd) - 1,
+		"ffmpeg -loglevel info -i \"%s\" "
 		"-f rawvideo -pix_fmt rgb24 - | "
-		"\"%s\" \"%s\" --pipe --width %d --height %d | "
-		"ffmpeg -loglevel error -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -r %d/%d -i - "
+		"\"%s\" \"%s\" --pipe --width %d --height %d 2>\"%s\\img2spec_diag.log\" | "
+		"ffmpeg -loglevel info -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -r %d/%d -i - "
 		"-vf \"scale=iw*%d:-1:flags=neighbor\" ",
 		gVideoFilename,
 		exePath, workspacePath,
 		gVideoWidth, gVideoHeight,
+		tempDir,
 		gDevice->mXRes, gDevice->mYRes,
 		gVideoFpsNum, gVideoFpsDen,
 		gOptExportScale);
@@ -1227,7 +1248,7 @@ void poll_video_export()
 			// Audio remux (no console window)
 			char remuxCmd[8192];
 			_snprintf(remuxCmd, sizeof(remuxCmd),
-				"cmd.exe /c ffmpeg -loglevel error -i \"%s\" -i \"%s\" "
+				"cmd.exe /c ffmpeg -loglevel info -i \"%s\" -i \"%s\" "
 				"-c:v copy -c:a aac -map 0:v:0 -map 1:a:0 -y \"%s\""
 				"&& move /Y \"%s\" \"%s\"",
 				exportAbsPath, gVideoFilename,
@@ -1286,6 +1307,16 @@ void pipe_loop()
 	int dh = gDevice->mYRes;
 	int dpixels = dw * dh;
 
+	fprintf(stderr, "DIAG: pipe_loop() device=%s res=%dx%d pipeRes=%dx%d\n",
+		gDevice ? gDevice->getname() : "NULL", dw, dh, gPipeWidth, gPipeHeight);
+
+	{
+		int mc = 0;
+		Modifier *w = gModifierRoot;
+		while (w) { mc++; w = w->mNext; }
+		fprintf(stderr, "DIAG: pipe_loop() modifier count = %d\n", mc);
+	}
+
 #ifdef _WIN32
 	_setmode(_fileno(stdin), _O_BINARY);
 	_setmode(_fileno(stdout), _O_BINARY);
@@ -1297,6 +1328,7 @@ void pipe_loop()
 	int spixels = sw * sh;
 
 	unsigned char *buf = new unsigned char[spixels * 3];
+	int frameCount = 0;
 	while (fread(buf, 1, spixels * 3, stdin) == (size_t)(spixels * 3))
 	{
 		// Store full-resolution source for modifiers (ScalePos etc.)
@@ -1335,6 +1367,8 @@ void pipe_loop()
 
 		gDirtyPic = 1;
 		gDirty = 1;
+		if (frameCount == 0)
+			fprintf(stderr, "DIAG: pipe_loop() processing first frame\n");
 		process_image();
 		gDevice->filter();
 		gDirty = 0;
@@ -1344,14 +1378,16 @@ void pipe_loop()
 		{
 			unsigned int c = gBitmapSpec[i];
 			unsigned char rgba[4] = {
-				(unsigned char)((c >> 16) & 0xff),
-				(unsigned char)((c >> 8) & 0xff),
 				(unsigned char)(c & 0xff),
+				(unsigned char)((c >> 8) & 0xff),
+				(unsigned char)((c >> 16) & 0xff),
 				0xff };
 			fwrite(rgba, 1, 4, stdout);
 		}
 		fflush(stdout);
+		frameCount++;
 	}
+	fprintf(stderr, "DIAG: pipe_loop() processed %d frames\n", frameCount);
 	delete[] buf;
 }
 
@@ -1481,6 +1517,7 @@ int main(int aParamc, char**aParams)
 			}
 			else
 			{
+				fprintf(stderr, "DIAG: main() loading arg '%s'\n", aParams[i]);
 				loadimg(aParams[i]);
 				loadworkspace(aParams[i]);
 			}
@@ -1490,6 +1527,11 @@ int main(int aParamc, char**aParams)
 	// --pipe mode: workspace loaded above, now enter pipe loop
 	if (pipe_mode)
 	{
+		fprintf(stderr, "DIAG: main() --pipe mode, device=%s res=%dx%d gPipeWidth=%d gPipeHeight=%d\n",
+			gDevice ? gDevice->getname() : "NULL",
+			gDevice ? gDevice->mXRes : 0,
+			gDevice ? gDevice->mYRes : 0,
+			gPipeWidth, gPipeHeight);
 		pipe_loop();
 		return 0;
 	}
