@@ -58,7 +58,7 @@ Still, if you find it useful, great!
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize.h"
 
-#define VERSION "5.0"
+#define VERSION "5.1"
 
 #define SERIALIZE(x) json_object_dotset_number(root, #x, x);
 #define DESERIALIZE(x) if (json_object_dotget_value(root, #x) != NULL) x = json_object_dotget_number(root, #x);
@@ -1141,10 +1141,10 @@ void start_video_export()
 
 	char cmd[16384];
 	_snprintf(cmd, sizeof(cmd) - 1,
-		"ffmpeg -loglevel info -fflags nobuffer -i \"%s\" "
+		"ffmpeg -loglevel info -i \"%s\" "
 		"-f rawvideo -pix_fmt rgb24 - | "
 		"\"%s\" \"%s\" --pipe --width %d --height %d | "
-		"ffmpeg -loglevel info -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -r %s -i - "
+		"ffmpeg -loglevel info -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -framerate %s -i - "
 		"-vf \"scale=iw*%d:-1:flags=neighbor\" ",
 		gVideoFilename,
 		exePath, workspacePath,
@@ -1401,8 +1401,6 @@ void pipe_loop()
 
 		gDirtyPic = 1;
 		gDirty = 1;
-		if (frameCount == 0)
-			fprintf(stderr, "DIAG: pipe_loop() processing first frame\n");
 		process_image();
 		gDevice->filter();
 		gDirty = 0;
