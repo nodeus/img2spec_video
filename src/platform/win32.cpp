@@ -34,7 +34,7 @@ const char *openDialog(const char *Title, const char *Filter) {
 
     ofn.nMaxFile = 1024;
 
-    ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
     ofn.lpstrFile = szFileName;
 
     ofn.lpstrTitle = Title;
@@ -57,7 +57,7 @@ const char *saveDialog(const char *Title, const char *Filter, const char *Ext) {
 
     ofn.nMaxFile = 1024;
 
-    ofn.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT;
+    ofn.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
     ofn.lpstrFile = szFileName;
 
     ofn.lpstrTitle = Title;
