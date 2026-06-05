@@ -1132,18 +1132,25 @@ void start_video_export()
 	char exportAbsPath[MAX_PATH];
 	_snprintf(exportAbsPath, MAX_PATH, "%s\\%s", gStartupCwd, gOptExportFilename);
 
+	// Framerate string: -r 60 or -r 24000/1001
+	char fpsStr[32];
+	if (gVideoFpsDen == 1)
+		_snprintf(fpsStr, sizeof(fpsStr), "%d", gVideoFpsNum);
+	else
+		_snprintf(fpsStr, sizeof(fpsStr), "%d/%d", gVideoFpsNum, gVideoFpsDen);
+
 	char cmd[16384];
 	_snprintf(cmd, sizeof(cmd) - 1,
 		"ffmpeg -loglevel info -fflags nobuffer -i \"%s\" "
 		"-f rawvideo -pix_fmt rgb24 - | "
 		"\"%s\" \"%s\" --pipe --width %d --height %d | "
-		"ffmpeg -loglevel info -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -r %d/%d -i - "
+		"ffmpeg -loglevel info -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -r %s -i - "
 		"-vf \"scale=iw*%d:-1:flags=neighbor\" ",
 		gVideoFilename,
 		exePath, workspacePath,
 		gVideoWidth, gVideoHeight,
 		gDevice->mXRes, gDevice->mYRes,
-		gVideoFpsNum, gVideoFpsDen,
+		fpsStr,
 		gOptExportScale);
 
 	// User extra params
@@ -1172,7 +1179,7 @@ void start_video_export()
 	}
 
 	// Write batch file (needed for cmd.exe pipeline with |)
-	// Redirect each process's stderr to a log file (cmd.exe /c parsing of 2> is unreliable)
+	// Use group redirect 2>>"log" (... ) to capture ALL stderr (cmd.exe + pipe processes)
 	char logPath[MAX_PATH + 32];
 	_snprintf(logPath, MAX_PATH + 32, "%s\\img2spec_export_stderr.log", tempDir);
 
@@ -1181,25 +1188,11 @@ void start_video_export()
 
 	FILE *f = fopen(batchPath, "w");
 	fprintf(f, "@echo off\n");
-	fprintf(f, "type nul > \"%s\"\n", logPath);
-	fprintf(f, "echo Before pipe >&2\n");
-	// Insert 2>>"log" before each | in the pipeline
-	char *p = cmd;
-	while (*p)
-	{
-		if (p[0] == ' ' && p[1] == '|' && p[2] == ' ')
-		{
-			fprintf(f, " 2>>\"%s\" |", logPath);
-			p += 3;
-		}
-		else
-		{
-			fputc(*p, f);
-			p++;
-		}
-	}
-	fprintf(f, " 2>>\"%s\"\n", logPath);
-	fprintf(f, "echo After pipe >&2\n");
+	fprintf(f, "echo [%%DATE%% %%TIME%%] Before pipe > \"%s\"\n", logPath);
+	fprintf(f, "2>>\"%s\" (\n", logPath);
+	fprintf(f, "  %s\n", cmd);
+	fprintf(f, ")\n");
+	fprintf(f, "echo [%%DATE%% %%TIME%%] Exit=%%ERRORLEVEL%% >> \"%s\"\n", logPath);
 	fclose(f);
 
 	// Run batch file via cmd.exe (CREATE_NO_WINDOW = no console window)
