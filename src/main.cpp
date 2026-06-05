@@ -1344,9 +1344,9 @@ void pipe_loop()
 		{
 			unsigned int c = gBitmapSpec[i];
 			unsigned char rgba[4] = {
-				(unsigned char)(c & 0xff),
-				(unsigned char)((c >> 8) & 0xff),
 				(unsigned char)((c >> 16) & 0xff),
+				(unsigned char)((c >> 8) & 0xff),
+				(unsigned char)(c & 0xff),
 				0xff };
 			fwrite(rgba, 1, 4, stdout);
 		}
