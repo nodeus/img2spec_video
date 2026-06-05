@@ -1,5 +1,19 @@
 # Changelog
 
+## 5.1 — Export Pipeline Fixes
+
+### Bug Fixes
+
+- **Export first-frame freeze** — removed `-fflags nobuffer` from decoder ffmpeg, which caused frames to be output in decode order (instead of presentation order), leading to 150 duplicate/skipped frames (~2.5s) due to H.264 B-frame reordering
+- **Export framerate consistency** — `-framerate` now used for rawvideo input in encoder ffmpeg (replaces `-r`), matching rawvideo demuxer semantics
+- **Export decoder output** — removed redundant `-r` and `-vsync` options from decoder ffmpeg, letting it output at native source framerate without vsync interference
+
+### Improvements
+
+- All first-frame diagnostic code (`prev_buf`, `memcmp`, `dup_warn`) removed from `pipe_loop()` after issue resolution
+
+---
+
 ## 5.0 — Video Mode & CLI Optimization
 
 ### Major Features

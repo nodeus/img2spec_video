@@ -58,7 +58,7 @@ Still, if you find it useful, great!
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize.h"
 
-#define VERSION "5.0"
+#define VERSION "5.1"
 
 #define SERIALIZE(x) json_object_dotset_number(root, #x, x);
 #define DESERIALIZE(x) if (json_object_dotget_value(root, #x) != NULL) x = json_object_dotget_number(root, #x);
@@ -100,12 +100,15 @@ int gOptZoom = 2;
 int gOptZoomStyle = 0;
 int gOptTrackFile = 1;
 int gDeviceId = 0;
+char gStartupCwd[MAX_PATH] = "";
 
 // Видео-режим
 bool gVideoMode = false;
 char gVideoFilename[1024] = "";
 double gVideoDuration = 0.0;
 double gVideoFps = 25.0;
+int gVideoFpsNum = 25000;
+int gVideoFpsDen = 1000;
 int gVideoTotalFrames = 0;
 int gVideoCurrentFrame = 0;
 int gVideoWidth = 0;
@@ -117,6 +120,7 @@ int gOptExportScale = 8;
 int gOptExportEncoder = 0;
 int gOptExportQuality = 17;
 char gOptExportFilename[1024] = "";
+char gOptExportExtraParams[1024] = "";
 
 int gPipeWidth = 0;   // --width for --pipe mode
 int gPipeHeight = 0;  // --height for --pipe mode
@@ -326,10 +330,25 @@ void process_image()
 
 	bitmap_to_float(gBitmapOrig);
 
+	// ScalePos must be applied FIRST: it resamples from gSourceImageData into
+	// gBitmapOrig and calls bitmap_to_float, resetting all float data.
+	// All other modifiers work on that resampled base.
 	Modifier *walker = gModifierApplyStack;
 	while (walker)
 	{
-		if (walker->mEnabled)
+		if (walker->mEnabled && walker->gettype() == MOD_SCALEPOS)
+		{
+			walker->process();
+			break;
+		}
+		walker = walker->mApplyNext;
+	}
+
+	// All other modifiers
+	walker = gModifierApplyStack;
+	while (walker)
+	{
+		if (walker->mEnabled && walker->gettype() != MOD_SCALEPOS)
 			walker->process();
 		walker = walker->mApplyNext;
 	}
@@ -387,11 +406,15 @@ void loadworkspace(char *aFilename = nullptr)
 
 	if (FileName)
 	{
+		fprintf(stderr, "DIAG: loadworkspace() loading '%s'\n", FileName);
 
 		JSON_Value *root_value = json_parse_file(FileName);
 		if (root_value)
 		{
 			JSON_Object *root = json_value_get_object(root_value);
+			fprintf(stderr, "DIAG: loadworkspace() JSON OK, magic=%s ver=%.0f\n",
+				json_object_dotget_string(root, "About.Magic") ? json_object_dotget_string(root, "About.Magic") : "NULL",
+				json_object_dotget_number(root, "About.Version"));
 			if (_stricmp(json_object_dotget_string(root, "About.Magic"), "0x50534D49") == 0 &&
 				json_object_dotget_number(root, "About.Version") == 4)
 			{
@@ -458,6 +481,7 @@ void loadworkspace(char *aFilename = nullptr)
 					if (json_object_get_value(item, "Type"))
 					{
 						m = (int)json_object_get_number(item, "Type");
+						fprintf(stderr, "DIAG: loadworkspace() modifier[%d] type=%d\n", number, m);
 						
 						Modifier *n = 0;
 						switch (m)
@@ -477,6 +501,7 @@ void loadworkspace(char *aFilename = nullptr)
 						case MOD_SUPERBLACK: n = new SuperblackModifier; break;
 						case MOD_CURVE: n = new CurveModifier; break;
 						default:
+							fprintf(stderr, "DIAG: loadworkspace() unknown modifier type %d\n", m);
 							json_value_free(root_value);
 							return;
 						}
@@ -488,9 +513,22 @@ void loadworkspace(char *aFilename = nullptr)
 					sprintf(path, "Stack.Item[%d]", number);
 					item = json_object_dotget_object(root, path);
 				}
+				fprintf(stderr, "DIAG: loadworkspace() loaded %d modifiers, deviceId=%d\n", number, gDeviceId);
+			}
+			else
+			{
+				fprintf(stderr, "DIAG: loadworkspace() magic/version check failed\n");
 			}
 			json_value_free(root_value);
 		}
+		else
+		{
+			fprintf(stderr, "DIAG: loadworkspace() json_parse_file failed\n");
+		}
+	}
+	else
+	{
+		fprintf(stderr, "DIAG: loadworkspace() FileName is NULL\n");
 	}
 }
 
@@ -892,6 +930,9 @@ char *run_pipe(const char *cmd)
 
 void get_video_frame(int frameNum)
 {
+	gDirty = 1;
+	gDirtyPic = 1;
+
 	if (gVideoWidth == 0 || gVideoHeight == 0) return;
 
 	double sec = (double)frameNum / gVideoFps;
@@ -965,8 +1006,9 @@ void get_video_frame(int frameNum)
 
 	delete[] buf;
 	gVideoCurrentFrame = frameNum;
-	gDirty = 1;
-	gDirtyPic = 1; // triggers ScalePosModifier to re-scale from gSourceImageData
+
+	// Update Original texture so the window shows the current scrubbed frame
+	update_texture(gTextureOrig, gBitmapOrig);
 }
 
 void load_video(const char *filename)
@@ -998,12 +1040,16 @@ void load_video(const char *filename)
 		int num = 0, den = 1;
 		sscanf(res, "%d/%d", &num, &den);
 		gVideoFps = (den > 0) ? (double)num / den : 25.0;
+		gVideoFpsNum = (den > 0) ? num : 25000;
+		gVideoFpsDen = (den > 0) ? den : 1000;
 	}
 	else
 	{
 		gVideoFps = atof(res);
+		gVideoFpsNum = (int)(gVideoFps * 1000 + 0.5);
+		gVideoFpsDen = 1000;
 	}
-	if (gVideoFps <= 0) gVideoFps = 25.0;
+	if (gVideoFps <= 0) { gVideoFps = 25.0; gVideoFpsNum = 25000; gVideoFpsDen = 1000; }
 
 	gVideoTotalFrames = (int)(gVideoDuration * gVideoFps + 0.5);
 	gVideoCurrentFrame = 0;
@@ -1037,14 +1083,18 @@ void start_video_export()
 	}
 
 #ifdef _WIN32
+	// Ensure temp/ subdirectory exists in startup CWD
+	char tempDir[MAX_PATH];
+	_snprintf(tempDir, MAX_PATH, "%s\\temp", gStartupCwd);
+	CreateDirectoryA(tempDir, NULL);
+
 	// Get full path to this executable (has --pipe support)
 	char exePath[MAX_PATH];
 	GetModuleFileNameA(NULL, exePath, MAX_PATH);
 
 	// Save current workspace (modifiers + device) to temp file
 	char workspacePath[MAX_PATH];
-	GetTempPathA(MAX_PATH, workspacePath);
-	strcat(workspacePath, "img2spec_export.isw");
+	_snprintf(workspacePath, MAX_PATH, "%s\\img2spec_export.isw", tempDir);
 
 	build_applystack();
 	JSON_Value *root_value = json_value_init_object();
@@ -1075,53 +1125,74 @@ void start_video_export()
 		walker = walker->mApplyNext;
 		number++;
 	}
+	fprintf(stderr, "DIAG: start_video_export() workspace=%s modifiers=%d\n", workspacePath, number);
 	json_serialize_to_file_pretty(root_value, workspacePath);
 	json_value_free(root_value);
 
-	int outW = gDevice->mXRes * gOptExportScale;
-	int outH = gDevice->mYRes * gOptExportScale;
+	char exportAbsPath[MAX_PATH];
+	_snprintf(exportAbsPath, MAX_PATH, "%s\\%s", gStartupCwd, gOptExportFilename);
+
+	// Framerate string: -r 60 or -r 24000/1001
+	char fpsStr[32];
+	if (gVideoFpsDen == 1)
+		_snprintf(fpsStr, sizeof(fpsStr), "%d", gVideoFpsNum);
+	else
+		_snprintf(fpsStr, sizeof(fpsStr), "%d/%d", gVideoFpsNum, gVideoFpsDen);
+
 	char cmd[16384];
-	sprintf(cmd,
-		"ffmpeg -loglevel error -i \"%s\" "
+	_snprintf(cmd, sizeof(cmd) - 1,
+		"ffmpeg -loglevel info -i \"%s\" "
 		"-f rawvideo -pix_fmt rgb24 - | "
 		"\"%s\" \"%s\" --pipe --width %d --height %d | "
-		"ffmpeg -loglevel error -y -f rawvideo -pix_fmt rgba -s %dx%d -r %d -i - "
-		"-vf scale=%d:%d ",
+		"ffmpeg -loglevel info -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -framerate %s -i - "
+		"-vf \"scale=iw*%d:-1:flags=neighbor\" ",
 		gVideoFilename,
 		exePath, workspacePath,
 		gVideoWidth, gVideoHeight,
 		gDevice->mXRes, gDevice->mYRes,
-		(int)gVideoFps,
-		outW, outH);
+		fpsStr,
+		gOptExportScale);
+
+	// User extra params
+	if (gOptExportExtraParams[0])
+		sprintf(cmd + strlen(cmd), "%s ", gOptExportExtraParams);
 
 	// Encoder-specific args
 	switch (gOptExportEncoder)
 	{
-	case 0: // NVIDIA NVENC
+		case 0: // NVIDIA NVENC
 		sprintf(cmd + strlen(cmd),
 			"-c:v hevc_nvenc -profile:v main -pix_fmt yuv420p "
-			"-preset fast -rc constqp -qp %d -init_qpB 2 \"%s\"",
-			gOptExportQuality, gOptExportFilename);
+			"-preset fast -movflags +faststart -rc constqp -qp %d \"%s\"",
+			gOptExportQuality, exportAbsPath);
 		break;
 	case 1: // AMD AMF
 		sprintf(cmd + strlen(cmd),
 			"-c:v hevc_amf -rc cqp -qp_p %d -qp_i %d -pix_fmt yuv420p \"%s\"",
-			gOptExportQuality, gOptExportQuality, gOptExportFilename);
+			gOptExportQuality, gOptExportQuality, exportAbsPath);
 		break;
 	default: // CPU x264
 		sprintf(cmd + strlen(cmd),
 			"-c:v libx264 -crf %d -pix_fmt yuv420p \"%s\"",
-			gOptExportQuality, gOptExportFilename);
+			gOptExportQuality, exportAbsPath);
 		break;
 	}
 
 	// Write batch file (needed for cmd.exe pipeline with |)
+	// Use group redirect 2>>"log" (... ) to capture ALL stderr (cmd.exe + pipe processes)
+	char logPath[MAX_PATH + 32];
+	_snprintf(logPath, MAX_PATH + 32, "%s\\img2spec_export_stderr.log", tempDir);
+
 	char batchPath[MAX_PATH];
-	GetTempPathA(MAX_PATH, batchPath);
-	strcat(batchPath, "img2spec_export.bat");
+	_snprintf(batchPath, MAX_PATH, "%s\\img2spec_export.bat", tempDir);
 
 	FILE *f = fopen(batchPath, "w");
-	fprintf(f, "%s\n", cmd);
+	fprintf(f, "@echo off\n");
+	fprintf(f, "echo [%%DATE%% %%TIME%%] Before pipe > \"%s\"\n", logPath);
+	fprintf(f, "2>>\"%s\" (\n", logPath);
+	fprintf(f, "  %s\n", cmd);
+	fprintf(f, ")\n");
+	fprintf(f, "echo [%%DATE%% %%TIME%%] Exit=%%ERRORLEVEL%% >> \"%s\"\n", logPath);
 	fclose(f);
 
 	// Run batch file via cmd.exe (CREATE_NO_WINDOW = no console window)
@@ -1134,11 +1205,14 @@ void start_video_export()
 
 	gExportRunning = 1;
 	gVideoExportProgress = 0.0f;
+	gVideoExportActive = true;
 
 	if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-		0, NULL, NULL, &si, &pi))
+		CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
 	{
 		gExportRunning = 0;
+		gVideoExportProgress = 0.0f;
+		gVideoExportActive = false;
 		printf("Export: CreateProcess failed (error %d)\n", GetLastError());
 	}
 	else
@@ -1162,28 +1236,81 @@ void poll_video_export()
 	}
 	else
 	{
-		// Done
+		// Encoding process done — close handles
 		gExportRunning = 0;
-		gVideoExportProgress = 1.0f;
-		gVideoExportActive = false;
 		CloseHandle(gExportProc.hProcess);
 		CloseHandle(gExportProc.hThread);
 
-		// Audio remux (no console window)
-		char remuxCmd[8192];
-		sprintf(remuxCmd,
-			"cmd.exe /c ffmpeg -loglevel error -i \"%s\" -i \"%s\" "
-			"-c:v copy -c:a aac -map 0:v:0 -map 1:a:0 -y \"%s_tmp.mp4\" "
-			"&& move /Y \"%s_tmp.mp4\" \"%s\"",
-			gOptExportFilename, gVideoFilename,
-			gOptExportFilename, gOptExportFilename, gOptExportFilename);
-		STARTUPINFOA si2 = {0}; si2.cb = sizeof(si2);
-		PROCESS_INFORMATION pi2 = {0};
-		CreateProcessA(NULL, remuxCmd, NULL, NULL, FALSE,
-			CREATE_NO_WINDOW, NULL, NULL, &si2, &pi2);
-		WaitForSingleObject(pi2.hProcess, INFINITE);
-		CloseHandle(pi2.hProcess);
-		CloseHandle(pi2.hThread);
+		// Check if source video has an audio stream
+		char probeCmd[4096];
+		char probeResult[64] = "";
+		_snprintf(probeCmd, sizeof(probeCmd),
+			"ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 \"%s\"",
+			gVideoFilename);
+		FILE *probe = _popen(probeCmd, "r");
+		if (probe)
+		{
+			if (fgets(probeResult, sizeof(probeResult), probe))
+			{
+				// Remove trailing newline
+				size_t len = strlen(probeResult);
+				if (len > 0 && probeResult[len-1] == '\n') probeResult[len-1] = 0;
+			}
+			_pclose(probe);
+		}
+
+		int hasAudio = (strstr(probeResult, "audio") != NULL);
+
+		if (hasAudio)
+		{
+			// Build _tmp filename correctly (strip .ext, append _tmp.mp4)
+			char tmpPath[MAX_PATH];
+			strcpy(tmpPath, gOptExportFilename);
+			char *dot = strrchr(tmpPath, '.');
+			if (dot) *dot = 0;
+			strcat(tmpPath, "_tmp.mp4");
+
+			char exportAbsPath[MAX_PATH];
+			_snprintf(exportAbsPath, MAX_PATH, "%s\\%s", gStartupCwd, gOptExportFilename);
+			char tmpAbsPath[MAX_PATH];
+			_snprintf(tmpAbsPath, MAX_PATH, "%s\\%s_tmp.mp4", gStartupCwd, gOptExportFilename);
+
+			// Audio remux (no console window)
+			char remuxCmd[8192];
+			_snprintf(remuxCmd, sizeof(remuxCmd),
+				"cmd.exe /c ffmpeg -loglevel info -i \"%s\" -i \"%s\" "
+				"-c:v copy -c:a aac -map 0:v:0 -map 1:a:0 -y \"%s\""
+				"&& move /Y \"%s\" \"%s\"",
+				exportAbsPath, gVideoFilename,
+				tmpAbsPath, tmpAbsPath, exportAbsPath);
+
+			STARTUPINFOA si2 = {0}; si2.cb = sizeof(si2);
+			PROCESS_INFORMATION pi2 = {0};
+
+			if (CreateProcessA(NULL, remuxCmd, NULL, NULL, FALSE,
+				CREATE_NO_WINDOW, NULL, NULL, &si2, &pi2))
+			{
+				WaitForSingleObject(pi2.hProcess, INFINITE);
+				DWORD remuxExit = 0;
+				GetExitCodeProcess(pi2.hProcess, &remuxExit);
+				CloseHandle(pi2.hProcess);
+				CloseHandle(pi2.hThread);
+
+				if (remuxExit != 0)
+				{
+					printf("Export: audio remux failed (exit code %lu), video saved without audio\n", remuxExit);
+					// Clean up orphaned _tmp.mp4 if it exists
+					DeleteFileA(tmpAbsPath);
+				}
+			}
+			else
+			{
+				printf("Export: audio remux CreateProcess failed (error %d), video saved without audio\n", GetLastError());
+			}
+		}
+
+		gVideoExportProgress = 1.0f;
+		gVideoExportActive = false;
 
 		printf("Export complete: %s\n", gOptExportFilename);
 	}
@@ -1210,10 +1337,23 @@ void pipe_loop()
 	int dh = gDevice->mYRes;
 	int dpixels = dw * dh;
 
+	fprintf(stderr, "DIAG: pipe_loop() device=%s res=%dx%d pipeRes=%dx%d\n",
+		gDevice ? gDevice->getname() : "NULL", dw, dh, gPipeWidth, gPipeHeight);
+
+	{
+		int mc = 0;
+		Modifier *w = gModifierRoot;
+		while (w) { mc++; w = w->mNext; }
+		fprintf(stderr, "DIAG: pipe_loop() modifier count = %d\n", mc);
+	}
+
 #ifdef _WIN32
 	_setmode(_fileno(stdin), _O_BINARY);
 	_setmode(_fileno(stdout), _O_BINARY);
 #endif
+
+	// Large buffer for stdin (read frames from decoder), default stdout (fflush per frame)
+	setvbuf(stdin, NULL, _IOFBF, 16 * 1024 * 1024);
 
 	// Use original resolution from --width/--height if provided, else device res
 	int sw = gPipeWidth > 0 ? gPipeWidth : dw;
@@ -1221,6 +1361,8 @@ void pipe_loop()
 	int spixels = sw * sh;
 
 	unsigned char *buf = new unsigned char[spixels * 3];
+	unsigned char *frame_out = new unsigned char[dpixels * 4];
+	int frameCount = 0;
 	while (fread(buf, 1, spixels * 3, stdin) == (size_t)(spixels * 3))
 	{
 		// Store full-resolution source for modifiers (ScalePos etc.)
@@ -1264,24 +1406,29 @@ void pipe_loop()
 		gDirty = 0;
 		gDirtyPic = 0;
 
+		// Build RGBA output buffer: one fwrite + fflush per frame
 		for (int i = 0; i < dpixels; i++)
 		{
 			unsigned int c = gBitmapSpec[i];
-			unsigned char rgba[4] = {
-				(unsigned char)(c & 0xff),
-				(unsigned char)((c >> 8) & 0xff),
-				(unsigned char)((c >> 16) & 0xff),
-				0xff };
-			fwrite(rgba, 1, 4, stdout);
+			frame_out[i * 4 + 0] = (unsigned char)(c & 0xff);
+			frame_out[i * 4 + 1] = (unsigned char)((c >> 8) & 0xff);
+			frame_out[i * 4 + 2] = (unsigned char)((c >> 16) & 0xff);
+			frame_out[i * 4 + 3] = 0xff;
 		}
+		fwrite(frame_out, 1, dpixels * 4, stdout);
 		fflush(stdout);
+		frameCount++;
 	}
+	delete[] frame_out;
+	fprintf(stderr, "DIAG: pipe_loop() processed %d frames\n", frameCount);
 	delete[] buf;
 }
 
 int main(int aParamc, char**aParams)
 {
 	SDL_SysWMinfo wminfo;
+
+	GetCurrentDirectoryA(MAX_PATH, gStartupCwd);
 
 	gDevice = new ZXSpectrumDevice;
 
@@ -1403,6 +1550,7 @@ int main(int aParamc, char**aParams)
 			}
 			else
 			{
+				fprintf(stderr, "DIAG: main() loading arg '%s'\n", aParams[i]);
 				loadimg(aParams[i]);
 				loadworkspace(aParams[i]);
 			}
@@ -1412,6 +1560,11 @@ int main(int aParamc, char**aParams)
 	// --pipe mode: workspace loaded above, now enter pipe loop
 	if (pipe_mode)
 	{
+		fprintf(stderr, "DIAG: main() --pipe mode, device=%s res=%dx%d gPipeWidth=%d gPipeHeight=%d\n",
+			gDevice ? gDevice->getname() : "NULL",
+			gDevice ? gDevice->mXRes : 0,
+			gDevice ? gDevice->mYRes : 0,
+			gPipeWidth, gPipeHeight);
 		pipe_loop();
 		return 0;
 	}
@@ -1835,11 +1988,13 @@ int main(int aParamc, char**aParams)
 			if (ImGui::Begin("Export video", &gWindowExport,
 				ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize))
 			{
-				ImGui::InputText("Output file", gOptExportFilename, 1024);
+				ImGuiInputTextFlags flags = gVideoExportActive ? ImGuiInputTextFlags_ReadOnly : 0;
+				ImGui::InputText("Output file", gOptExportFilename, 1024, flags);
 				ImGui::Combo("Encoder", &gOptExportEncoder,
 					"NVIDIA NVENC\0AMD AMF\0CPU x264\0");
 				ImGui::SliderInt("Quality (CRF/QP)", &gOptExportQuality, 0, 51);
 				ImGui::SliderInt("Scale", &gOptExportScale, 1, 32);
+				ImGui::InputText("Extra ffmpeg params", gOptExportExtraParams, 1024);
 				const char *encoders[] = {"NVENC", "AMF", "x264"};
 				ImGui::Text("Settings: %s | x%d | Q%d",
 					encoders[gOptExportEncoder],
