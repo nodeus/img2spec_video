@@ -330,10 +330,25 @@ void process_image()
 
 	bitmap_to_float(gBitmapOrig);
 
+	// ScalePos must be applied FIRST: it resamples from gSourceImageData into
+	// gBitmapOrig and calls bitmap_to_float, resetting all float data.
+	// All other modifiers work on that resampled base.
 	Modifier *walker = gModifierApplyStack;
 	while (walker)
 	{
-		if (walker->mEnabled)
+		if (walker->mEnabled && walker->gettype() == MOD_SCALEPOS)
+		{
+			walker->process();
+			break;
+		}
+		walker = walker->mApplyNext;
+	}
+
+	// All other modifiers
+	walker = gModifierApplyStack;
+	while (walker)
+	{
+		if (walker->mEnabled && walker->gettype() != MOD_SCALEPOS)
 			walker->process();
 		walker = walker->mApplyNext;
 	}
