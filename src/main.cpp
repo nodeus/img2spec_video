@@ -1136,13 +1136,12 @@ void start_video_export()
 	_snprintf(cmd, sizeof(cmd) - 1,
 		"ffmpeg -loglevel info -fflags nobuffer -i \"%s\" "
 		"-f rawvideo -pix_fmt rgb24 - | "
-		"\"%s\" \"%s\" --pipe --width %d --height %d 2>\"%s\\img2spec_diag.log\" | "
+		"\"%s\" \"%s\" --pipe --width %d --height %d | "
 		"ffmpeg -loglevel info -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -r %d/%d -i - "
 		"-vf \"scale=iw*%d:-1:flags=neighbor\" ",
 		gVideoFilename,
 		exePath, workspacePath,
 		gVideoWidth, gVideoHeight,
-		tempDir,
 		gDevice->mXRes, gDevice->mYRes,
 		gVideoFpsNum, gVideoFpsDen,
 		gOptExportScale);
@@ -1181,8 +1180,11 @@ void start_video_export()
 	fclose(f);
 
 	// Run batch file via cmd.exe (CREATE_NO_WINDOW = no console window)
-	char cmdline[MAX_PATH + 32];
-	sprintf(cmdline, "cmd.exe /c \"%s\"", batchPath);
+	// Redirect all stderr (ffmpeg + img2spec) to log file for diagnostics
+	char cmdline[MAX_PATH + 64];
+	_snprintf(cmdline, sizeof(cmdline) - 1,
+		"cmd.exe /c \"%s\" 2>\"%s\\img2spec_export_stderr.log\"",
+		batchPath, tempDir);
 
 	STARTUPINFOA si = {0};
 	si.cb = sizeof(si);
