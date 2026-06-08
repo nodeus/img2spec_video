@@ -61,20 +61,6 @@
 
 - CLI arguments processed sequentially and independently
 - `process_and_save()` helper reduces code duplication
-- Export respects all modifiers (Scale/Position, etc.)
-- Cleaner build with MSVC 19.44 (VS 2022 BuildTools)
-- `imgui.ini` removed from version control
-
-### Bug Fixes
-
-- Color byte order (R↔B swap) in `get_video_frame()` and `pipe_loop()`
-- `ScalePosModifier::process()` now correctly uses `gSourceImageData`
-- Infinite file dialog loops in video mode (`gOptTrackFile`/`gDirtyPic` guards)
-- Export pipeline: `STARTF_USESTDHANDLES` without handle assignment no longer kills stdin
-- `CREATE_NO_WINDOW` vs `DETACHED_PROCESS` selection for background export
-- Binary mode (`_setmode`) for stdin/stdout in pipe mode
-- Output ffmpeg now uses `-i -` to read from stdin, `-r` for framerate, `-vf scale` for scaling
-- Fixed `main10` profile mismatch (changed to `main` for 8-bit yuv420p)
 
 ---
 
