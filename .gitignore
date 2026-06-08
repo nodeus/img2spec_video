@@ -5,3 +5,6 @@ out/
 build/
 imgui.ini
 build-w*
+.opencode
+PLAN_2.md
+PLAN_3.md
