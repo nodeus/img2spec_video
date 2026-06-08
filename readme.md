@@ -4,7 +4,8 @@
 
 GUI tool for converting images to ZX Spectrum (and similar retro-platform) format, with **video processing support**.
 
-Originally by Jari Komppa — extended with video mode, pipe processing, and CLI batch features.
+Originally by Jari Komppa.
+Extended with video mode, pipe processing, and CLI batch features by nodeus.
 
 ---
 
@@ -79,28 +80,6 @@ ffmpeg (extract frames) -> img2spec --pipe (apply modifiers) -> ffmpeg (encode +
 
 ---
 
-## Building
-
-### Requirements
-- **SDL2** — tested with v2.30.x (choco: `choco install sdl2`)
-- **CMake** 3.20+ (choco: `choco install cmake.install`)
-- **MSVC BuildTools 2022** or Visual Studio 2022
-- **ffmpeg** in PATH (for video mode at runtime)
-
-### Build commands
-
-```bash
-# Configure
-cmake -B build -G "Visual Studio 17 2022" -DSDL2_DIR="C:\libraries\sdl2\cmake"
-
-# Build
-cmake --build build --config Release
-```
-
-Output: `build\Release\img2spec.exe`
-
----
-
 ## Device Modes
 
 | Device | Resolution | Description |
@@ -116,6 +95,7 @@ Output: `build\Release\img2spec.exe`
 
 Copyright (c) 2015-2016 Jari Komppa — zlib/libpng license
 
+2026 Additional video features by nodeus https://nodeus.ru
 ```
 This software is provided 'as-is', without any express or implied warranty.
 In no event will the authors be held liable for any damages arising from
