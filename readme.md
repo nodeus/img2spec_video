@@ -67,6 +67,8 @@ ffmpeg -i video.mp4 -f rawvideo -pix_fmt rgb24 - |
 
 ## Video Export Pipeline
 
+Ffmpeg is required to work, registered in the path or located in the program folder.
+
 The export pipeline uses three-stage chaining without intermediate disk I/O:
 
 ```
