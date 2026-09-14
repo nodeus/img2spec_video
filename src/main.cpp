@@ -58,7 +58,7 @@ Still, if you find it useful, great!
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize.h"
 
-#define VERSION "5.2"
+#define VERSION "5.3"
 
 #define SERIALIZE(x) json_object_dotset_number(root, #x, x);
 #define DESERIALIZE(x) if (json_object_dotget_value(root, #x) != NULL) x = json_object_dotget_number(root, #x);
@@ -113,6 +113,8 @@ int gVideoTotalFrames = 0;
 int gVideoCurrentFrame = 0;
 int gVideoWidth = 0;
 int gVideoHeight = 0;
+bool gVideoPlaying = false;
+Uint32 gVideoPlayLastTick = 0;
 bool gWindowExport = false;
 bool gVideoExportActive = false;
 float gVideoExportProgress = 0.0f;
@@ -124,8 +126,23 @@ char gOptExportExtraParams[1024] = "";
 int gOptExportLoglevel = 0;  // 0=info, 1=error, 2=warning, 3=verbose, 4=debug
 bool gOptExportCleanup = true;
 
+// Video keyframes: per-frame full snapshots (Device + Stack)
+struct VideoKeyframe {
+	int frame;
+	JSON_Value *snapshot;  // owns a JSON value with Device + Stack
+};
+
+#define KEYFRAME_MAX 4096
+VideoKeyframe gKeyframes[KEYFRAME_MAX];
+int gKeyframeCount = 0;
+bool gKeyframesLoaded = false;  // sidecar loaded for current video
+bool gKeyframeSuspendCapture = false;  // suppress auto-capture during apply/load
+int gLastAppliedKeyframeIdx = -1;  // index of last applied key (for change detection)
+JSON_Value *gKeyframeClipboard = NULL;  // clipboard for copy/paste key params
+
 int gPipeWidth = 0;   // --width for --pipe mode
 int gPipeHeight = 0;  // --height for --pipe mode
+char gPipeKeysPath[MAX_PATH] = "";  // --keys for --pipe mode
 
 // Texture handles
 GLuint gTextureOrig, gTextureProc, gTextureSpec, gTextureAttr, gTextureAttr2, gTextureBitm; 
@@ -393,6 +410,111 @@ void addModifier(Modifier *aNewModifier)
 	gDirty = 1;
 }
 
+// Free all modifiers in the stack
+void clear_modifiers()
+{
+	Modifier *walker = gModifierRoot;
+	while (walker)
+	{
+		Modifier *last = walker;
+		walker = walker->mNext;
+		delete last;
+	}
+	gModifierRoot = 0;
+}
+
+// Serialize Device + Stack into a JSON object (no Config/About — for snapshots)
+void serialize_snapshot_to_json(JSON_Object *root)
+{
+	json_object_dotset_number(root, "Config.gDeviceId", gDeviceId);
+	json_object_dotset_string(root, "Device.Name", gDevice->getname());
+	gDevice->writeOptions(root);
+
+	Modifier *walker = gModifierApplyStack;
+	int number = 0;
+	while (walker)
+	{
+		char path[256], temp[256];
+		sprintf(path, "Stack.Item[%d]", number);
+		sprintf(temp, "%s.Name", path);
+		json_object_dotset_string(root, temp, walker->getname());
+		sprintf(temp, "%s.Type", path);
+		json_object_dotset_number(root, temp, walker->gettype());
+		JSON_Object *item = json_object_dotget_object(root, path);
+		walker->serialize_common(item);
+		walker->serialize(item);
+		walker = walker->mApplyNext;
+		number++;
+	}
+}
+
+// Deserialize Device + Stack from a JSON object (clears existing state)
+void deserialize_snapshot_from_json(JSON_Object *root)
+{
+	// Device
+	int deviceId = (int)json_object_dotget_number(root, "Config.gDeviceId");
+	if (json_object_dotget_value(root, "Device.Name") != NULL)
+	{
+		delete gDevice;
+		gDevice = 0;
+		switch (deviceId)
+		{
+		case 0: gDevice = new ZXSpectrumDevice; break;
+		case 1: gDevice = new ZX3x64Device; break;
+		case 2: gDevice = new ZXHalfTileDevice; break;
+		case 3: gDevice = new C64HiresDevice; break;
+		case 4: gDevice = new C64MulticolorDevice; break;
+		default: gDevice = new ZXSpectrumDevice; break;
+		}
+		gDevice->readOptions(root);
+	}
+
+	// Stack
+	clear_modifiers();
+	int number = 0;
+	char path[256];
+	sprintf(path, "Stack.Item[%d]", number);
+	JSON_Object *item = json_object_dotget_object(root, path);
+
+	while (item)
+	{
+		int m;
+		if (json_object_get_value(item, "Type"))
+		{
+			m = (int)json_object_get_number(item, "Type");
+			Modifier *n = 0;
+			switch (m)
+			{
+			case MOD_SCALEPOS: n = new ScalePosModifier; break;
+			case MOD_RGB: n = new RGBModifier; break;
+			case MOD_YIQ: n = new YIQModifier; break;
+			case MOD_HSV: n = new HSVModifier; break;
+			case MOD_NOISE: n = new NoiseModifier; break;
+			case MOD_ORDEREDDITHER: n = new OrderedDitherModifier; break;
+			case MOD_ERRORDIFFUSION: n = new ErrorDiffusionDitherModifier; break;
+			case MOD_CONTRAST: n = new ContrastModifier; break;
+			case MOD_BLUR: n = new BlurModifier; break;
+			case MOD_EDGE: n = new EdgeModifier; break;
+			case MOD_MINMAX: n = new MinmaxModifier; break;
+			case MOD_QUANTIZE: n = new QuantizeModifier; break;
+			case MOD_SUPERBLACK: n = new SuperblackModifier; break;
+			case MOD_CURVE: n = new CurveModifier; break;
+			default:
+				number++;
+				sprintf(path, "Stack.Item[%d]", number);
+				item = json_object_dotget_object(root, path);
+				continue;
+			}
+			addModifier(n);
+			n->deserialize_common(item);
+			n->deserialize(item);
+		}
+		number++;
+		sprintf(path, "Stack.Item[%d]", number);
+		item = json_object_dotget_object(root, path);
+	}
+}
+
 void loadworkspace(char *aFilename = nullptr)
 {
 	gDirty = 1;
@@ -440,82 +562,8 @@ void loadworkspace(char *aFilename = nullptr)
 				READCONFIG(gDeviceId);
 #pragma warning(default:4244; default:4800)
 #undef READCONFIG
-				delete gDevice;
-				gDevice = 0;
-				switch (gDeviceId)
-				{
-				case 0:
-					gDevice = new ZXSpectrumDevice;
-					break;
-				case 1:
-					gDevice = new ZX3x64Device;
-					break;
-				case 2:
-					gDevice = new ZXHalfTileDevice;
-					break;
-				case 3:
-					gDevice = new C64HiresDevice;
-					break;
-				case 4:
-					gDevice = new C64MulticolorDevice;
-					break;
-				}
-				gDevice->readOptions(root);
-
-				Modifier *walker = gModifierRoot;
-				while (walker)
-				{
-					Modifier *last = walker;
-					walker = walker->mNext;
-					delete last;
-				}
-				gModifierRoot = 0;
-
-				int number = 0;
-				char path[256];
-				sprintf(path, "Stack.Item[%d]", number);
-				JSON_Object *item = json_object_dotget_object(root, path);
-
-				while (item)
-				{
-					
-					int m;
-					if (json_object_get_value(item, "Type"))
-					{
-						m = (int)json_object_get_number(item, "Type");
-						fprintf(stderr, "DIAG: loadworkspace() modifier[%d] type=%d\n", number, m);
-						
-						Modifier *n = 0;
-						switch (m)
-						{
-						case MOD_SCALEPOS: n = new ScalePosModifier; break;
-						case MOD_RGB: n = new RGBModifier; break;
-						case MOD_YIQ: n = new YIQModifier; break;
-						case MOD_HSV: n = new HSVModifier; break;
-						case MOD_NOISE: n = new NoiseModifier; break;
-						case MOD_ORDEREDDITHER: n = new OrderedDitherModifier; break;
-						case MOD_ERRORDIFFUSION: n = new ErrorDiffusionDitherModifier; break;
-						case MOD_CONTRAST: n = new ContrastModifier; break;
-						case MOD_BLUR: n = new BlurModifier; break;
-						case MOD_EDGE: n = new EdgeModifier; break;
-						case MOD_MINMAX: n = new MinmaxModifier; break;
-						case MOD_QUANTIZE: n = new QuantizeModifier; break;
-						case MOD_SUPERBLACK: n = new SuperblackModifier; break;
-						case MOD_CURVE: n = new CurveModifier; break;
-						default:
-							fprintf(stderr, "DIAG: loadworkspace() unknown modifier type %d\n", m);
-							json_value_free(root_value);
-							return;
-						}
-						addModifier(n);
-						n->deserialize_common(item);
-						n->deserialize(item);
-					}
-					number++;
-					sprintf(path, "Stack.Item[%d]", number);
-					item = json_object_dotget_object(root, path);
-				}
-				fprintf(stderr, "DIAG: loadworkspace() loaded %d modifiers, deviceId=%d\n", number, gDeviceId);
+				deserialize_snapshot_from_json(root);
+				fprintf(stderr, "DIAG: loadworkspace() loaded, deviceId=%d\n", gDeviceId);
 			}
 			else
 			{
@@ -546,10 +594,10 @@ void saveworkspace()
 	{
 		JSON_Value *root_value = json_value_init_object();
 		JSON_Object *root = json_value_get_object(root_value);
-		json_object_dotset_string(root, "About.WhatIsThis", "Image Spectrumizer " VERSION " workspace file"); 		
+		json_object_dotset_string(root, "About.WhatIsThis", "Image Spectrumizer " VERSION " workspace file");
 		json_object_dotset_string(root, "About.Magic", "0x50534D49");
 		json_object_dotset_number(root, "About.Version", 4);
-			
+
 #define WRITECONFIG(x) json_object_dotset_number(root, "Config." #x, x);
 		WRITECONFIG(gWindowAbout);
 		WRITECONFIG(gWindowAttribBitmap);
@@ -567,28 +615,10 @@ void saveworkspace()
 		WRITECONFIG(gOptTrackFile);
 		WRITECONFIG(gOptTopmost);
 		WRITECONFIG(gDeviceId);
-		json_object_dotset_string(root, "Device.Name", gDevice->getname());
 #undef WRITECONFIG
-		gDevice->writeOptions(root);
 
-		Modifier *walker = gModifierApplyStack;		
-		int number = 0;
-		while (walker)
-		{
-			char path[256];
-			sprintf(path, "Stack.Item[%d]", number);
-			char temp[256];
-			sprintf(temp, "%s.Name", path);
-			json_object_dotset_string(root, temp, walker->getname());
-			sprintf(temp, "%s.Type", path);
-			json_object_dotset_number(root, temp, walker->gettype());
-			JSON_Object *item = json_object_dotget_object(root, path);
-			walker->serialize_common(item);
-			walker->serialize(item);
-			walker = walker->mApplyNext;
-			number++;
-		}
-
+		build_applystack();
+		serialize_snapshot_to_json(root);
 
 		json_serialize_to_file_pretty(root_value, FileName);
 		json_value_free(root_value);
@@ -906,10 +936,47 @@ void measurecrap()
 }
 */
 
+#ifdef _WIN32
+static FILE *_popen_no_window(const char *cmd, const char *mode)
+{
+	HANDLE hRead = NULL, hWrite = NULL;
+	SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
+	if (!CreatePipe(&hRead, &hWrite, &sa, 0))
+		return NULL;
+	SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+	STARTUPINFOA si = {0};
+	si.cb = sizeof(si);
+	si.dwFlags = STARTF_USESTDHANDLES;
+	si.hStdOutput = hWrite;
+	si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+	si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+	char cmdline[4096];
+	_snprintf(cmdline, sizeof(cmdline), "cmd.exe /c \"%s\"", cmd);
+
+	PROCESS_INFORMATION pi = {0};
+	if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE,
+		CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+	{
+		CloseHandle(hRead); CloseHandle(hWrite);
+		return NULL;
+	}
+	CloseHandle(hWrite);
+	CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+
+	int fd = _open_osfhandle((intptr_t)hRead, _O_BINARY);
+	if (fd < 0) { CloseHandle(hRead); return NULL; }
+	FILE *f = _fdopen(fd, mode);
+	if (!f) { _close(fd); return NULL; }
+	return f;
+}
+#endif
+
 char *run_pipe(const char *cmd)
 {
 #ifdef _WIN32
-	FILE *f = _popen(cmd, "rt");
+	FILE *f = _popen_no_window(cmd, "rt");
 #else
 	FILE *f = popen(cmd, "r");
 #endif
@@ -930,6 +997,12 @@ char *run_pipe(const char *cmd)
 	return buf;
 }
 
+// Forward declarations for keyframe functions (defined after load_video)
+static void keyframe_clear();
+static void keyframe_load_sidecar();
+static void keyframe_apply(int frame);
+static void keyframe_save_sidecar();
+
 void get_video_frame(int frameNum)
 {
 	gDirty = 1;
@@ -947,7 +1020,7 @@ void get_video_frame(int frameNum)
 		"ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 "
 		"-s %dx%d -v quiet -",
 		sec, gVideoFilename, vw, vh);
-	FILE *pipe = _popen(cmd, "rb");
+	FILE *pipe = _popen_no_window(cmd, "rb");
 #else
 	sprintf(cmd,
 		"ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 "
@@ -956,6 +1029,10 @@ void get_video_frame(int frameNum)
 	FILE *pipe = popen(cmd, "r");
 #endif
 	if (!pipe) return;
+
+	// Update frame counter immediately so the timeline slider reflects
+	// the requested position even if the decode pipe fails
+	gVideoCurrentFrame = frameNum;
 
 	unsigned char *buf = new unsigned char[vw * vh * 3];
 	size_t read = fread(buf, 1, vw * vh * 3, pipe);
@@ -1007,7 +1084,10 @@ void get_video_frame(int frameNum)
 	}
 
 	delete[] buf;
-	gVideoCurrentFrame = frameNum;
+
+	// Apply effective keyframe if it changed
+	if (gKeyframesLoaded && gKeyframeCount > 0)
+		keyframe_apply(frameNum);
 
 	// Update Original texture so the window shows the current scrubbed frame
 	update_texture(gTextureOrig, gBitmapOrig);
@@ -1016,6 +1096,11 @@ void get_video_frame(int frameNum)
 void load_video(const char *filename)
 {
 	if (!filename) return;
+
+	// Clear any existing keyframes from previous video
+	keyframe_clear();
+	gVideoPlaying = false;
+	gVideoPlayLastTick = 0;
 
 	char cmd[4096];
 	const char *res;
@@ -1060,7 +1145,254 @@ void load_video(const char *filename)
 
 	// Загружаем первый кадр
 	get_video_frame(0);
+
+	// Load keyframe sidecar for this video
+	keyframe_load_sidecar();
+
+	// Arm auto-capture: allow modifier changes to create keyframes
+	// even if no sidecar existed yet
+	if (!gKeyframesLoaded)
+		gKeyframesLoaded = true;
 }
+
+// --- Video keyframes ---
+
+// Build sidecar path: <video_filename>.keyframes.json
+static void keyframe_sidecar_path(char *out, int outSize)
+{
+	const char *base = strrchr(gVideoFilename, '\\');
+	if (!base) base = strrchr(gVideoFilename, '/');
+	if (base) base++; else base = gVideoFilename;
+	_snprintf(out, outSize, "%s\\%s.keyframes.json", gStartupCwd, base);
+}
+
+// Find effective keyframe index for a given frame (max frame <= target)
+// Returns -1 if no key applies (use base state)
+static int keyframe_find_effective(int frame)
+{
+	int best = -1;
+	for (int i = 0; i < gKeyframeCount; i++)
+	{
+		if (gKeyframes[i].frame <= frame)
+		{
+			if (best < 0 || gKeyframes[i].frame > gKeyframes[best].frame)
+				best = i;
+		}
+	}
+	return best;
+}
+
+// Apply effective keyframe's snapshot to live state (Device + Stack)
+static void keyframe_apply(int frame)
+{
+	int idx = keyframe_find_effective(frame);
+	if (idx == gLastAppliedKeyframeIdx) return;  // no change
+	gLastAppliedKeyframeIdx = idx;
+
+	gKeyframeSuspendCapture = true;
+
+	if (idx >= 0 && gKeyframes[idx].snapshot)
+	{
+		JSON_Object *root = json_value_get_object(gKeyframes[idx].snapshot);
+		deserialize_snapshot_from_json(root);
+	}
+
+	gDirty = 1;
+	gDirtyPic = 1;
+	gKeyframeSuspendCapture = false;
+}
+
+// Create or update a keyframe at exact frame from current live state
+static void keyframe_upsert(int frame)
+{
+	// On first keyframe creation, mark sidecar as loaded (enables saving)
+	if (!gKeyframesLoaded)
+		gKeyframesLoaded = true;
+
+	// Find existing key at this exact frame
+	for (int i = 0; i < gKeyframeCount; i++)
+	{
+		if (gKeyframes[i].frame == frame)
+		{
+			// Update existing
+			if (gKeyframes[i].snapshot)
+				json_value_free(gKeyframes[i].snapshot);
+			build_applystack();
+			gKeyframes[i].snapshot = json_value_init_object();
+			serialize_snapshot_to_json(json_value_get_object(gKeyframes[i].snapshot));
+			keyframe_save_sidecar();
+			return;
+		}
+	}
+	// Insert new
+	if (gKeyframeCount >= KEYFRAME_MAX) return;
+	build_applystack();
+	gKeyframes[gKeyframeCount].frame = frame;
+	gKeyframes[gKeyframeCount].snapshot = json_value_init_object();
+	serialize_snapshot_to_json(json_value_get_object(gKeyframes[gKeyframeCount].snapshot));
+	gKeyframeCount++;
+	keyframe_save_sidecar();
+}
+
+// Delete keyframe at exact frame
+static void keyframe_delete(int frame)
+{
+	for (int i = 0; i < gKeyframeCount; i++)
+	{
+		if (gKeyframes[i].frame == frame)
+		{
+			if (gKeyframes[i].snapshot)
+				json_value_free(gKeyframes[i].snapshot);
+			// Shift remaining
+			for (int j = i; j < gKeyframeCount - 1; j++)
+				gKeyframes[j] = gKeyframes[j + 1];
+			gKeyframeCount--;
+			gLastAppliedKeyframeIdx = -1;  // force re-evaluate
+			keyframe_save_sidecar();
+			return;
+		}
+	}
+}
+
+// Save all keyframes to sidecar JSON
+static void keyframe_save_sidecar()
+{
+	if (!gVideoMode || !gKeyframesLoaded) return;
+
+	char path[MAX_PATH];
+	keyframe_sidecar_path(path, sizeof(path));
+
+	JSON_Value *root_value = json_value_init_object();
+	JSON_Object *root = json_value_get_object(root_value);
+
+	json_object_dotset_string(root, "Video.File", gVideoFilename);
+	json_object_dotset_number(root, "Video.FpsNum", gVideoFpsNum);
+	json_object_dotset_number(root, "Video.FpsDen", gVideoFpsDen);
+	json_object_dotset_number(root, "Video.TotalFrames", gVideoTotalFrames);
+
+	json_object_set_value(root, "Keys", json_value_init_array());
+	JSON_Array *keysArr = json_object_get_array(root, "Keys");
+
+	for (int i = 0; i < gKeyframeCount; i++)
+	{
+		JSON_Value *entryVal = json_value_init_object();
+		json_array_append_value(keysArr, entryVal);
+		JSON_Object *entry = json_value_get_object(entryVal);
+		json_object_dotset_number(entry, "frame", gKeyframes[i].frame);
+
+		if (gKeyframes[i].snapshot)
+		{
+			JSON_Object *snap = json_value_get_object(gKeyframes[i].snapshot);
+			// Copy all fields from snapshot into entry (Device.*, Stack.*)
+			size_t fieldCount = json_object_get_count(snap);
+			for (size_t j = 0; j < fieldCount; j++)
+			{
+				const char *key = json_object_get_name(snap, j);
+				JSON_Value *val = json_object_get_value(snap, key);
+				json_object_set_value(entry, key, json_value_deep_copy(val));
+			}
+		}
+	}
+
+	json_serialize_to_file_pretty(root_value, path);
+	json_value_free(root_value);
+
+	// Verify write succeeded
+	FILE *ftest = fopen(path, "r");
+	if (ftest)
+		fclose(ftest);
+	else
+		fprintf(stderr, "DIAG: keyframe_save_sidecar() FAILED to write '%s'\n", path);
+}
+
+// Load keyframes from sidecar JSON
+static void keyframe_load_sidecar()
+{
+	gKeyframeCount = 0;
+	gKeyframesLoaded = false;
+	gLastAppliedKeyframeIdx = -1;
+
+	char path[MAX_PATH];
+	keyframe_sidecar_path(path, sizeof(path));
+
+	JSON_Value *root_value = json_parse_file(path);
+	if (!root_value) return;  // no sidecar — fine
+
+	JSON_Object *root = json_value_get_object(root_value);
+
+	// Validate video matches
+	const char *file = json_object_dotget_string(root, "Video.File");
+	if (!file || _stricmp(file, gVideoFilename) != 0)
+	{
+		fprintf(stderr, "DIAG: keyframe_load_sidecar() video mismatch, ignoring\n");
+		json_value_free(root_value);
+		return;
+	}
+
+	gKeyframesLoaded = true;
+
+	// Load keys
+	JSON_Array *keysArr = json_object_get_array(root, "Keys");
+	if (keysArr)
+	{
+		int count = json_array_get_count(keysArr);
+		for (int i = 0; i < count && gKeyframeCount < KEYFRAME_MAX; i++)
+		{
+			JSON_Object *entry = json_array_get_object(keysArr, i);
+			int frame = (int)json_object_dotget_number(entry, "frame");
+
+			// Reconstruct full snapshot from nested fields
+			// Build a temporary JSON value with Device + Stack
+			JSON_Value *snap = json_value_init_object();
+			JSON_Object *snapRoot = json_value_get_object(snap);
+
+			// Copy Device.Name
+			const char *devName = json_object_dotget_string(entry, "Device.Name");
+			if (devName)
+				json_object_dotset_string(snapRoot, "Device.Name", devName);
+
+			// Copy all Device.* fields
+			// Copy all Stack.Item[N] fields
+			// This requires iterating the entry's keys — parson supports this
+			// via json_object_get_count / json_object_get_name
+
+			// Copy entire entry content to snapRoot
+			size_t count2 = json_object_get_count(entry);
+			for (size_t j = 0; j < count2; j++)
+			{
+				const char *key = json_object_get_name(entry, j);
+				JSON_Value *val = json_object_get_value(entry, key);
+				// Skip "frame" — already handled
+				if (strcmp(key, "frame") == 0) continue;
+				json_object_set_value(snapRoot, key, json_value_deep_copy(val));
+			}
+
+			gKeyframes[gKeyframeCount].frame = frame;
+			gKeyframes[gKeyframeCount].snapshot = snap;
+			gKeyframeCount++;
+		}
+	}
+
+	fprintf(stderr, "DIAG: keyframe_load_sidecar() loaded %d keyframes from '%s'\n", gKeyframeCount, path);
+	json_value_free(root_value);
+}
+
+// Clear all keyframes and free snapshots
+static void keyframe_clear()
+{
+	for (int i = 0; i < gKeyframeCount; i++)
+	{
+		if (gKeyframes[i].snapshot)
+			json_value_free(gKeyframes[i].snapshot);
+		gKeyframes[i].snapshot = 0;
+	}
+	gKeyframeCount = 0;
+	gKeyframesLoaded = false;
+	gLastAppliedKeyframeIdx = -1;
+	if (gKeyframeClipboard) { json_value_free(gKeyframeClipboard); gKeyframeClipboard = NULL; }
+}
+
+// --- End video keyframes ---
 
 int pipe_mode = 0;
 
@@ -1070,16 +1402,54 @@ static PROCESS_INFORMATION gExportProc;
 static HANDLE gExportStderrRead = NULL;
 static int gExportRunning = 0;
 static long gExportLogPos = 0;
+static int gRemuxRunning = 0;
+static PROCESS_INFORMATION gRemuxProc = {0};
+static int gInExportFunc = 0;
+static int gLastExportCheckpoint = 0;
+static HANDLE gExportJob = NULL;
+
+static LONG WINAPI exportVectoredHandler(EXCEPTION_POINTERS *ep)
+{
+	if (gInExportFunc)
+	{
+		DWORD code = ep->ExceptionRecord->ExceptionCode;
+		const char *crashLog = "\\img2spec_crash.log";
+		char logPath[MAX_PATH];
+		_snprintf(logPath, MAX_PATH, "%s%s", gStartupCwd, crashLog);
+		FILE *cf = fopen(logPath, "a");
+		if (cf) {
+			SYSTEMTIME st;
+			GetLocalTime(&st);
+			fprintf(cf, "[%04d-%02d-%02d %02d:%02d:%02d] CRASH in start_video_export() at checkpoint %d: exception code=0x%08lX addr=0x%p\n",
+				st.wYear, st.wMonth, st.wDay,
+				st.wHour, st.wMinute, st.wSecond,
+				gLastExportCheckpoint, code,
+				(void*)ep->ExceptionRecord->ExceptionAddress);
+			fclose(cf);
+		}
+		fprintf(stderr, "CRASH at checkpoint %d: code=0x%08lX addr=0x%p\n",
+			gLastExportCheckpoint, code, (void*)ep->ExceptionRecord->ExceptionAddress);
+		gExportRunning = 0;
+		gVideoExportActive = false;
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
 #endif
 
 void start_video_export()
 {
+#ifdef _WIN32
+	gInExportFunc = 1;
+	gLastExportCheckpoint = 0;
+#endif
+
 	if (gOptExportFilename[0] == 0)
 	{
 		const char *base = strrchr(gVideoFilename, '\\');
 		if (!base) base = strrchr(gVideoFilename, '/');
 		if (base) base++; else base = gVideoFilename;
-		strcpy(gOptExportFilename, base);
+		_snprintf(gOptExportFilename, sizeof(gOptExportFilename) - 12, "%s", base);
 		char *dot = strrchr(gOptExportFilename, '.');
 		if (dot) *dot = 0;
 		strcat(gOptExportFilename, "_spmz.mp4");
@@ -1099,6 +1469,8 @@ void start_video_export()
 	char workspacePath[MAX_PATH];
 	_snprintf(workspacePath, MAX_PATH, "%s\\img2spec_export.isw", tempDir);
 
+	fprintf(stderr, "DIAG: export checkpoint 1 - build_applystack\n");
+	gLastExportCheckpoint = 1;
 	build_applystack();
 	JSON_Value *root_value = json_value_init_object();
 	JSON_Object *root = json_value_get_object(root_value);
@@ -1109,26 +1481,13 @@ void start_video_export()
 #define WRITECONFIG(x) json_object_dotset_number(root, "Config." #x, x);
 	WRITECONFIG(gDeviceId);
 #undef WRITECONFIG
-	json_object_dotset_string(root, "Device.Name", gDevice->getname());
-	gDevice->writeOptions(root);
 
-	Modifier *walker = gModifierApplyStack;
-	int number = 0;
-	while (walker)
-	{
-		char path[256], temp[256];
-		sprintf(path, "Stack.Item[%d]", number);
-		sprintf(temp, "%s.Name", path);
-		json_object_dotset_string(root, temp, walker->getname());
-		sprintf(temp, "%s.Type", path);
-		json_object_dotset_number(root, temp, walker->gettype());
-		JSON_Object *item = json_object_dotget_object(root, path);
-		walker->serialize_common(item);
-		walker->serialize(item);
-		walker = walker->mApplyNext;
-		number++;
-	}
-	fprintf(stderr, "DIAG: start_video_export() workspace=%s modifiers=%d\n", workspacePath, number);
+	fprintf(stderr, "DIAG: export checkpoint 2 - serialize_snapshot_to_json\n");
+	gLastExportCheckpoint = 2;
+	serialize_snapshot_to_json(root);
+
+	fprintf(stderr, "DIAG: export checkpoint 3 - json_serialize_to_file\n");
+	gLastExportCheckpoint = 3;
 	json_serialize_to_file_pretty(root_value, workspacePath);
 	json_value_free(root_value);
 
@@ -1152,48 +1511,122 @@ void start_video_export()
 	FILE *pf = fopen(progressPath, "w");
 	if (pf) fclose(pf);
 
-	char cmd[16384];
-	_snprintf(cmd, sizeof(cmd) - 1,
-		"ffmpeg -loglevel %s -i \"%s\" "
+	// Save keyframes to temp file for pipe mode if any exist
+	char keysPath[MAX_PATH] = "";
+	if (gKeyframeCount > 0)
+	{
+		_snprintf(keysPath, MAX_PATH, "%s\\img2spec_export_keys.json", tempDir);
+		// Write keyframes to temp file
+		JSON_Value *kv = json_value_init_object();
+		JSON_Object *ko = json_value_get_object(kv);
+		json_object_dotset_number(ko, "Video.FpsNum", gVideoFpsNum);
+		json_object_dotset_number(ko, "Video.FpsDen", gVideoFpsDen);
+		json_object_dotset_number(ko, "Video.TotalFrames", gVideoTotalFrames);
+		json_object_set_value(ko, "Keys", json_value_init_array());
+		JSON_Array *karr = json_object_get_array(ko, "Keys");
+		for (int i = 0; i < gKeyframeCount; i++)
+		{
+			JSON_Value *entryVal = json_value_init_object();
+			json_array_append_value(karr, entryVal);
+			JSON_Object *entry = json_value_get_object(entryVal);
+			json_object_dotset_number(entry, "frame", gKeyframes[i].frame);
+			if (gKeyframes[i].snapshot)
+			{
+				JSON_Object *snap = json_value_get_object(gKeyframes[i].snapshot);
+				size_t fieldCount = json_object_get_count(snap);
+				for (size_t j = 0; j < fieldCount; j++)
+				{
+					const char *key = json_object_get_name(snap, j);
+					JSON_Value *val = json_object_get_value(snap, key);
+					json_object_set_value(entry, key, json_value_deep_copy(val));
+				}
+			}
+		}
+		fprintf(stderr, "DIAG: export checkpoint 4 - save keyframes (%d)\n", gKeyframeCount);
+		gLastExportCheckpoint = 4;
+		json_serialize_to_file_pretty(kv, keysPath);
+		json_value_free(kv);
+	}
+
+	fprintf(stderr, "DIAG: export checkpoint 5 - build command\n");
+	gLastExportCheckpoint = 5;
+	static char cmd[16384];
+	gLastExportCheckpoint = 51;
+	{
+		char _dlog[MAX_PATH];
+		_snprintf(_dlog, MAX_PATH, "%s\\img2spec_crash.log", gStartupCwd);
+		FILE *_df = fopen(_dlog, "a");
+		if (_df) {
+			fprintf(_df, "DIAG args: loglevel=%p video=%p exe=%p ws=%p keys=%p fps=%p progress=%p gDevice=%p gVideoWidth=%d gVideoHeight=%d gOptExportScale=%d gOptExportFilename=%p gOptExportEncoder=%d gOptExportQuality=%d\n",
+				(void*)loglevelStr, (void*)gVideoFilename, (void*)exePath, (void*)workspacePath,
+				(void*)keysPath, (void*)fpsStr, (void*)progressPath, (void*)gDevice,
+				gVideoWidth, gVideoHeight, gOptExportScale,
+				(void*)gOptExportFilename, gOptExportEncoder, gOptExportQuality);
+			fclose(_df);
+		}
+	}
+	sprintf(cmd, "ffmpeg -loglevel %s -i \"%s\" "
 		"-f rawvideo -pix_fmt rgb24 - | "
-		"\"%s\" \"%s\" --pipe --width %d --height %d | "
+		"\"%s\" \"%s\" --pipe --width %d --height %d",
+		loglevelStr, gVideoFilename,
+		exePath, workspacePath,
+		gVideoWidth, gVideoHeight);
+	if (keysPath[0])
+		sprintf(cmd + strlen(cmd), " --keys \"%s\"", keysPath);
+	sprintf(cmd + strlen(cmd), " | "
 		"ffmpeg -loglevel %s -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -framerate %s -i -"
 		" -progress \"%s\""
 		" -vf \"scale=iw*%d:-1:flags=neighbor\" ",
-		loglevelStr, gVideoFilename,
-		exePath, workspacePath,
-		gVideoWidth, gVideoHeight,
 		loglevelStr,
 		gDevice->mXRes, gDevice->mYRes,
 		fpsStr,
 		progressPath,
 		gOptExportScale);
+	gLastExportCheckpoint = 52;
+	cmd[sizeof(cmd) - 1] = '\0';
+	gLastExportCheckpoint = 53;
 
 	// User extra params
 	if (gOptExportExtraParams[0])
-		sprintf(cmd + strlen(cmd), "%s ", gOptExportExtraParams);
+	{
+		size_t clen = strlen(cmd);
+		_snprintf(cmd + clen, sizeof(cmd) - clen - 1, "%s ", gOptExportExtraParams);
+	}
+	gLastExportCheckpoint = 54;
 
 	// Encoder-specific args
 	switch (gOptExportEncoder)
 	{
 		case 0: // NVIDIA NVENC
-		sprintf(cmd + strlen(cmd),
-			"-c:v hevc_nvenc -profile:v main -pix_fmt yuv420p "
-			"-preset fast -movflags +faststart -rc constqp -qp %d \"%s\"",
-			gOptExportQuality, exportAbsPath);
+		{
+			size_t clen = strlen(cmd);
+			_snprintf(cmd + clen, sizeof(cmd) - clen - 1,
+				"-c:v hevc_nvenc -profile:v main -pix_fmt yuv420p "
+				"-preset fast -movflags +faststart -rc constqp -qp %d \"%s\"",
+				gOptExportQuality, exportAbsPath);
+		}
 		break;
 	case 1: // AMD AMF
-		sprintf(cmd + strlen(cmd),
-			"-c:v hevc_amf -rc cqp -qp_p %d -qp_i %d -pix_fmt yuv420p \"%s\"",
-			gOptExportQuality, gOptExportQuality, exportAbsPath);
+		{
+			size_t clen = strlen(cmd);
+			_snprintf(cmd + clen, sizeof(cmd) - clen - 1,
+				"-c:v hevc_amf -rc cqp -qp_p %d -qp_i %d -pix_fmt yuv420p \"%s\"",
+				gOptExportQuality, gOptExportQuality, exportAbsPath);
+		}
 		break;
 	default: // CPU x264
-		sprintf(cmd + strlen(cmd),
-			"-c:v libx264 -crf %d -pix_fmt yuv420p \"%s\"",
-			gOptExportQuality, exportAbsPath);
+		{
+			size_t clen = strlen(cmd);
+			_snprintf(cmd + clen, sizeof(cmd) - clen - 1,
+				"-c:v libx264 -crf %d -pix_fmt yuv420p \"%s\"",
+				gOptExportQuality, exportAbsPath);
+		}
 		break;
 	}
+	gLastExportCheckpoint = 55;
 
+	fprintf(stderr, "DIAG: export checkpoint 6 - write batch file\n");
+	gLastExportCheckpoint = 6;
 	// Write batch file (needed for cmd.exe pipeline with |)
 	// Use group redirect 2>>"log" (... ) to capture ALL stderr (cmd.exe + pipe processes)
 	char logPath[MAX_PATH + 32];
@@ -1203,6 +1636,13 @@ void start_video_export()
 	_snprintf(batchPath, MAX_PATH, "%s\\img2spec_export.bat", tempDir);
 
 	FILE *f = fopen(batchPath, "w");
+	if (!f)
+	{
+		gExportRunning = 0;
+		gVideoExportActive = false;
+		fprintf(stderr, "Export: cannot create batch file '%s'\n", batchPath);
+		return;
+	}
 	fprintf(f, "@echo off\n");
 	fprintf(f, "echo [%%DATE%% %%TIME%%] Before pipe > \"%s\"\n", logPath);
 	fprintf(f, "2>>\"%s\" (\n", logPath);
@@ -1211,6 +1651,8 @@ void start_video_export()
 	fprintf(f, "echo [%%DATE%% %%TIME%%] Exit=%%ERRORLEVEL%% >> \"%s\"\n", logPath);
 	fclose(f);
 
+	fprintf(stderr, "DIAG: export checkpoint 7 - CreateProcess\n");
+	gLastExportCheckpoint = 7;
 	// Run batch file via cmd.exe (CREATE_NO_WINDOW = no console window)
 	char cmdline[MAX_PATH + 32];
 	sprintf(cmdline, "cmd.exe /c \"%s\"", batchPath);
@@ -1230,21 +1672,72 @@ void start_video_export()
 		gExportRunning = 0;
 		gVideoExportProgress = 0.0f;
 		gVideoExportActive = false;
-		printf("Export: CreateProcess failed (error %d)\n", GetLastError());
+		fprintf(stderr, "Export: CreateProcess failed (error %d)\n", GetLastError());
 	}
 	else
 	{
 		gExportProc = pi;
+		gExportJob = CreateJobObject(NULL, NULL);
+		if (gExportJob)
+		{
+			JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = {0};
+			jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+			SetInformationJobObject(gExportJob, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+			AssignProcessToJobObject(gExportJob, pi.hProcess);
+		}
+		fprintf(stderr, "DIAG: export checkpoint 8 - CreateProcess OK\n");
+		gLastExportCheckpoint = 8;
 	}
+#endif
+
+#ifdef _WIN32
+	gInExportFunc = 0;
 #endif
 }
 
 void poll_video_export()
 {
 #ifdef _WIN32
-	if (!gExportRunning) return;
+	if (!gExportRunning && !gRemuxRunning) return;
 
-	DWORD exitCode;
+	// Poll active audio remux (non-blocking)
+	if (gRemuxRunning)
+	{
+		DWORD remuxExit = 0;
+		if (GetExitCodeProcess(gRemuxProc.hProcess, &remuxExit) && remuxExit == STILL_ACTIVE)
+			return; // still running, check next frame
+
+		// Remux done
+		if (remuxExit != 0)
+			fprintf(stderr, "Export: audio remux failed (exit code %lu), video saved without audio\n", remuxExit);
+		CloseHandle(gRemuxProc.hProcess);
+		CloseHandle(gRemuxProc.hThread);
+		gRemuxProc.hProcess = NULL;
+		gRemuxProc.hThread = NULL;
+		gRemuxRunning = 0;
+
+		if (gOptExportCleanup)
+		{
+			char delPath[MAX_PATH + 32];
+			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_progress.txt", gStartupCwd);
+			DeleteFileA(delPath);
+			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export.bat", gStartupCwd);
+			DeleteFileA(delPath);
+			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export.isw", gStartupCwd);
+			DeleteFileA(delPath);
+			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_keys.json", gStartupCwd);
+			DeleteFileA(delPath);
+			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_stderr.log", gStartupCwd);
+			DeleteFileA(delPath);
+		}
+
+		gVideoExportProgress = 1.0f;
+		gVideoExportActive = false;
+		fprintf(stderr, "Export complete: %s\n", gOptExportFilename);
+		return;
+	}
+
+	DWORD exitCode = 0;
 	if (GetExitCodeProcess(gExportProc.hProcess, &exitCode) && exitCode == STILL_ACTIVE)
 	{
 		// Read ffmpeg -progress file to extract real progress
@@ -1284,16 +1777,21 @@ void poll_video_export()
 					}
 				}
 			}
-			gExportLogPos = ftell(pf);
+			long newPos = ftell(pf);
+			if (newPos >= 0) gExportLogPos = newPos;
 			fclose(pf);
 		}
 	}
 	else
 	{
 		// Encoding process done — close handles
+		fprintf(stderr, "DIAG: poll_video_export() export process exited with code %lu\n", exitCode);
 		gExportRunning = 0;
 		CloseHandle(gExportProc.hProcess);
 		CloseHandle(gExportProc.hThread);
+		gExportProc.hProcess = NULL;
+		gExportProc.hThread = NULL;
+		if (gExportJob) { CloseHandle(gExportJob); gExportJob = NULL; }
 
 		// Check if source video has an audio stream
 		char probeCmd[4096];
@@ -1301,12 +1799,11 @@ void poll_video_export()
 		_snprintf(probeCmd, sizeof(probeCmd),
 			"ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 \"%s\"",
 			gVideoFilename);
-		FILE *probe = _popen(probeCmd, "r");
+		FILE *probe = _popen_no_window(probeCmd, "r");
 		if (probe)
 		{
 			if (fgets(probeResult, sizeof(probeResult), probe))
 			{
-				// Remove trailing newline
 				size_t len = strlen(probeResult);
 				if (len > 0 && probeResult[len-1] == '\n') probeResult[len-1] = 0;
 			}
@@ -1317,9 +1814,8 @@ void poll_video_export()
 
 		if (hasAudio)
 		{
-			// Build _tmp filename correctly (strip .ext, append _tmp.mp4)
 			char tmpPath[MAX_PATH];
-			strcpy(tmpPath, gOptExportFilename);
+			_snprintf(tmpPath, sizeof(tmpPath), "%s", gOptExportFilename);
 			char *dot = strrchr(tmpPath, '.');
 			if (dot) *dot = 0;
 			strcat(tmpPath, "_tmp.mp4");
@@ -1327,9 +1823,8 @@ void poll_video_export()
 			char exportAbsPath[MAX_PATH];
 			_snprintf(exportAbsPath, MAX_PATH, "%s\\%s", gStartupCwd, gOptExportFilename);
 			char tmpAbsPath[MAX_PATH];
-			_snprintf(tmpAbsPath, MAX_PATH, "%s\\%s_tmp.mp4", gStartupCwd, gOptExportFilename);
+			_snprintf(tmpAbsPath, MAX_PATH, "%s\\%s", gStartupCwd, tmpPath);
 
-			// Audio remux (no console window)
 			static const char *rlognames[] = {"info", "error", "warning", "verbose", "debug"};
 			int ridx = gOptExportLoglevel;
 			if (ridx < 0 || ridx > 4) ridx = 0;
@@ -1344,47 +1839,40 @@ void poll_video_export()
 				tmpAbsPath, tmpAbsPath, exportAbsPath);
 
 			STARTUPINFOA si2 = {0}; si2.cb = sizeof(si2);
-			PROCESS_INFORMATION pi2 = {0};
 
 			if (CreateProcessA(NULL, remuxCmd, NULL, NULL, FALSE,
-				CREATE_NO_WINDOW, NULL, NULL, &si2, &pi2))
+				CREATE_NO_WINDOW, NULL, NULL, &si2, &gRemuxProc))
 			{
-				WaitForSingleObject(pi2.hProcess, INFINITE);
-				DWORD remuxExit = 0;
-				GetExitCodeProcess(pi2.hProcess, &remuxExit);
-				CloseHandle(pi2.hProcess);
-				CloseHandle(pi2.hThread);
-
-				if (remuxExit != 0)
-				{
-					printf("Export: audio remux failed (exit code %lu), video saved without audio\n", remuxExit);
-					// Clean up orphaned _tmp.mp4 if it exists
-					DeleteFileA(tmpAbsPath);
-				}
+				gRemuxRunning = 1;
+				fprintf(stderr, "DIAG: poll_video_export() audio remux started\n");
 			}
 			else
 			{
-				printf("Export: audio remux CreateProcess failed (error %d), video saved without audio\n", GetLastError());
+				fprintf(stderr, "Export: audio remux CreateProcess failed (error %d), video saved without audio\n", GetLastError());
 			}
 		}
 
-		if (gOptExportCleanup)
+		if (!gRemuxRunning)
 		{
-			char delPath[MAX_PATH + 32];
-			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_progress.txt", gStartupCwd);
-			DeleteFileA(delPath);
-			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export.bat", gStartupCwd);
-			DeleteFileA(delPath);
-			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export.isw", gStartupCwd);
-			DeleteFileA(delPath);
-			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_stderr.log", gStartupCwd);
-			DeleteFileA(delPath);
+			if (gOptExportCleanup)
+			{
+				char delPath[MAX_PATH + 32];
+				_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_progress.txt", gStartupCwd);
+				DeleteFileA(delPath);
+				_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export.bat", gStartupCwd);
+				DeleteFileA(delPath);
+				_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export.isw", gStartupCwd);
+				DeleteFileA(delPath);
+				_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_keys.json", gStartupCwd);
+				DeleteFileA(delPath);
+				_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_stderr.log", gStartupCwd);
+				DeleteFileA(delPath);
+			}
+
+			gVideoExportProgress = 1.0f;
+			gVideoExportActive = false;
+			fprintf(stderr, "Export complete: %s\n", gOptExportFilename);
 		}
-
-		gVideoExportProgress = 1.0f;
-		gVideoExportActive = false;
-
-		printf("Export complete: %s\n", gOptExportFilename);
 	}
 #endif
 }
@@ -1392,14 +1880,31 @@ void poll_video_export()
 void cancel_video_export()
 {
 #ifdef _WIN32
+	// Close job handle first — kills ALL processes in the job tree
+	if (gExportJob)
+	{
+		CloseHandle(gExportJob);
+		gExportJob = NULL;
+	}
+	if (gRemuxRunning)
+	{
+		TerminateProcess(gRemuxProc.hProcess, 1);
+		CloseHandle(gRemuxProc.hProcess);
+		CloseHandle(gRemuxProc.hThread);
+		gRemuxProc.hProcess = NULL;
+		gRemuxProc.hThread = NULL;
+		gRemuxRunning = 0;
+	}
 	if (gExportRunning)
 	{
 		TerminateProcess(gExportProc.hProcess, 1);
 		CloseHandle(gExportProc.hProcess);
 		CloseHandle(gExportProc.hThread);
+		gExportProc.hProcess = NULL;
+		gExportProc.hThread = NULL;
 		gExportRunning = 0;
-		gVideoExportActive = false;
 	}
+	gVideoExportActive = false;
 #endif
 }
 
@@ -1411,6 +1916,46 @@ void pipe_loop()
 
 	fprintf(stderr, "DIAG: pipe_loop() device=%s res=%dx%d pipeRes=%dx%d\n",
 		gDevice ? gDevice->getname() : "NULL", dw, dh, gPipeWidth, gPipeHeight);
+
+	// Load keyframes if provided via --keys
+	bool hasKeys = false;
+	if (gPipeKeysPath[0])
+	{
+		// Parse keyframe file directly (not via sidecar path logic)
+		JSON_Value *kv = json_parse_file(gPipeKeysPath);
+		if (kv)
+		{
+			JSON_Object *ko = json_value_get_object(kv);
+			JSON_Array *karr = json_object_get_array(ko, "Keys");
+			if (karr)
+			{
+				int count = json_array_get_count(karr);
+				for (int i = 0; i < count && gKeyframeCount < KEYFRAME_MAX; i++)
+				{
+					JSON_Object *entry = json_array_get_object(karr, i);
+					int frame = (int)json_object_dotget_number(entry, "frame");
+
+					JSON_Value *snap = json_value_init_object();
+					JSON_Object *snapRoot = json_value_get_object(snap);
+					size_t fieldCount = json_object_get_count(entry);
+					for (size_t j = 0; j < fieldCount; j++)
+					{
+						const char *key = json_object_get_name(entry, j);
+						JSON_Value *val = json_object_get_value(entry, key);
+						if (strcmp(key, "frame") == 0) continue;
+						json_object_set_value(snapRoot, key, json_value_deep_copy(val));
+					}
+
+					gKeyframes[gKeyframeCount].frame = frame;
+					gKeyframes[gKeyframeCount].snapshot = snap;
+					gKeyframeCount++;
+				}
+				hasKeys = gKeyframeCount > 0;
+				fprintf(stderr, "DIAG: pipe_loop() loaded %d keyframes from %s\n", gKeyframeCount, gPipeKeysPath);
+			}
+			json_value_free(kv);
+		}
+	}
 
 	{
 		int mc = 0;
@@ -1473,6 +2018,11 @@ void pipe_loop()
 
 		gDirtyPic = 1;
 		gDirty = 1;
+
+		// Apply effective keyframe for this frame if keys exist
+		if (hasKeys)
+			keyframe_apply(frameCount);
+
 		process_image();
 		gDevice->filter();
 		gDirty = 0;
@@ -1501,6 +2051,10 @@ int main(int aParamc, char**aParams)
 	SDL_SysWMinfo wminfo;
 
 	GetCurrentDirectoryA(MAX_PATH, gStartupCwd);
+
+#ifdef _WIN32
+	AddVectoredExceptionHandler(0, exportVectoredHandler);
+#endif
 
 	gDevice = new ZXSpectrumDevice;
 
@@ -1544,7 +2098,8 @@ int main(int aParamc, char**aParams)
 		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
 		SDL_DisplayMode current;
 		SDL_GetCurrentDisplayMode(0, &current);
-		window = SDL_CreateWindow("Image Spectrumizer " VERSION " - http://iki.fi/sol", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
+		window = SDL_CreateWindow("Image Spectrumizer " VERSION " - http://iki.fi/sol", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,     1600, 800,
+    SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
 		glcontext = SDL_GL_CreateContext(window);
 		SDL_VERSION(&wminfo.version);
 		SDL_GetWindowWMInfo(window, &wminfo);
@@ -1617,6 +2172,8 @@ int main(int aParamc, char**aParams)
 						gPipeWidth = atoi(aParams[++i]);
 					else if (strcmp(aParams[i] + 2, "height") == 0 && i + 1 < aParamc)
 						gPipeHeight = atoi(aParams[++i]);
+					else if (strcmp(aParams[i] + 2, "keys") == 0 && i + 1 < aParamc)
+						strcpy(gPipeKeysPath, aParams[++i]);
 					continue;
 				}
 				switch (aParams[i][1])
@@ -1683,7 +2240,12 @@ int main(int aParamc, char**aParams)
         {
             ImGui_ImplSdl_ProcessEvent(&event);
             if (event.type == SDL_QUIT)
+            {
+                cancel_video_export();
                 done = true;
+            }
+            if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE)
+                gVideoPlaying = false;
         }
 
         ImGui_ImplSdl_NewFrame(window);
@@ -1997,7 +2559,13 @@ int main(int aParamc, char**aParams)
 		{
 			if (ImGui::Begin("Options", &gWindowOptions, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize))
 			{
+				int gDirtyPreOpt = gDirty;
 				gDevice->options();
+				if (gVideoMode && gKeyframesLoaded && !gKeyframeSuspendCapture
+					&& gDirty == 1 && gDirtyPreOpt == 0)
+				{
+					keyframe_upsert(gVideoCurrentFrame);
+				}
 				ImGui::Separator();
 				ImGui::SliderInt("Zoomed window zoom factor", &gOptZoom, 1, 8);
 				ImGui::Combo("Zoomed window style", &gOptZoomStyle, "Normal\0Separated cells\0");
@@ -2096,7 +2664,6 @@ int main(int aParamc, char**aParams)
 					if (ImGui::Button("Start export"))
 					{
 						start_video_export();
-						gVideoExportActive = true;
 					}
 				}
 			}
@@ -2107,7 +2674,7 @@ int main(int aParamc, char**aParams)
 		{
 			//ImGui::SetNextWindowSize(ImVec2(828, 512));
 			//ImGui::Begin("Image", 0, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
-			ImGui::SetNextWindowSize(ImVec2(828, ImGui::GetIO().DisplaySize.y-32));
+			ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.55f, ImGui::GetIO().DisplaySize.y-32));
 			ImGui::Begin("Image", 0, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
 		}
 		else
@@ -2191,17 +2758,51 @@ int main(int aParamc, char**aParams)
 					get_video_frame(frame);
 			}
 
+			// Draw keyframe markers on the timeline slider
+			if (gKeyframesLoaded && gKeyframeCount > 0)
+			{
+				ImDrawList *drawList = ImGui::GetWindowDrawList();
+				ImVec2 sliderMin = ImGui::GetItemRectMin();
+				ImVec2 sliderMax = ImGui::GetItemRectMax();
+				float sliderWidth = sliderMax.x - sliderMin.x;
+
+				for (int i = 0; i < gKeyframeCount; i++)
+				{
+					float t = (gVideoTotalFrames > 1)
+						? (float)gKeyframes[i].frame / (float)(gVideoTotalFrames - 1)
+						: 0.0f;
+					float x = sliderMin.x + t * sliderWidth;
+					// Red diamond marker
+					ImVec2 center(x, (sliderMin.y + sliderMax.y) * 0.5f);
+				ImVec2 p1(center.x, center.y - 5);
+				ImVec2 p2(center.x + 4, center.y);
+				ImVec2 p3(center.x, center.y + 5);
+				ImVec2 p4(center.x - 4, center.y);
+				ImVec2 pts[4] = { p1, p2, p3, p4 };
+				drawList->AddConvexPolyFilled(pts, 4, 0xDC3C3CFF, true);
+				}
+			}
+
 			ImGui::SameLine();
 			if (ImGui::Button("|<")) get_video_frame(0);
 			ImGui::SameLine();
 			if (ImGui::Button("<"))
 				get_video_frame(std::max(0, gVideoCurrentFrame - 1));
 			ImGui::SameLine();
+			if (ImGui::Button("-10"))
+				get_video_frame(std::max(0, gVideoCurrentFrame - 10));
+			ImGui::SameLine();
+			if (ImGui::Button("+10"))
+				get_video_frame(std::min(gVideoTotalFrames - 1, gVideoCurrentFrame + 10));
+			ImGui::SameLine();
 			if (ImGui::Button(">"))
 				get_video_frame(std::min(gVideoTotalFrames - 1, gVideoCurrentFrame + 1));
 			ImGui::SameLine();
 			if (ImGui::Button(">|"))
 				get_video_frame(gVideoTotalFrames - 1);
+			ImGui::SameLine();
+			if (ImGui::Button(gVideoPlaying ? "||##play" : ">##play"))
+				gVideoPlaying = !gVideoPlaying;
 			ImGui::SameLine();
 
 			int sec = (int)(gVideoCurrentFrame / gVideoFps);
@@ -2210,6 +2811,157 @@ int main(int aParamc, char**aParams)
 				sec / 60, sec % 60,
 				totalSec / 60, totalSec % 60,
 				gVideoFps);
+
+			// Keyframe controls
+			if (gKeyframesLoaded)
+			{
+				ImGui::Separator();
+				bool onKey = false;
+				for (int i = 0; i < gKeyframeCount; i++)
+				{
+					if (gKeyframes[i].frame == gVideoCurrentFrame)
+					{
+						onKey = true;
+						break;
+					}
+				}
+
+				if (onKey)
+				{
+					if (ImGui::Button("Update key"))
+					{
+						gKeyframeSuspendCapture = true;
+						keyframe_upsert(gVideoCurrentFrame);
+						gKeyframeSuspendCapture = false;
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Delete key"))
+					{
+						keyframe_delete(gVideoCurrentFrame);
+					}
+					ImGui::SameLine();
+					// Copy key: snapshot from the keyframe at current frame
+					if (ImGui::Button("Copy key"))
+					{
+						for (int i = 0; i < gKeyframeCount; i++)
+						{
+							if (gKeyframes[i].frame == gVideoCurrentFrame && gKeyframes[i].snapshot)
+							{
+								if (gKeyframeClipboard) json_value_free(gKeyframeClipboard);
+								gKeyframeClipboard = json_value_deep_copy(gKeyframes[i].snapshot);
+								break;
+							}
+						}
+					}
+				}
+				else
+				{
+					if (ImGui::Button("Add key"))
+					{
+						gKeyframeSuspendCapture = true;
+						keyframe_upsert(gVideoCurrentFrame);
+						gKeyframeSuspendCapture = false;
+					}
+				}
+
+				// Paste key: always visible when clipboard has data
+				if (gKeyframeClipboard)
+				{
+					ImGui::SameLine();
+					if (ImGui::Button("Paste key"))
+					{
+						// Find existing key at current frame or insert new
+						int existingIdx = -1;
+						for (int i = 0; i < gKeyframeCount; i++)
+						{
+							if (gKeyframes[i].frame == gVideoCurrentFrame)
+							{
+								existingIdx = i;
+								break;
+							}
+						}
+						if (existingIdx >= 0)
+						{
+							// Replace snapshot
+							if (gKeyframes[existingIdx].snapshot)
+								json_value_free(gKeyframes[existingIdx].snapshot);
+							gKeyframes[existingIdx].snapshot = json_value_deep_copy(gKeyframeClipboard);
+						}
+						else
+						{
+							// Insert new keyframe
+							if (gKeyframeCount < KEYFRAME_MAX)
+							{
+								gKeyframes[gKeyframeCount].frame = gVideoCurrentFrame;
+								gKeyframes[gKeyframeCount].snapshot = json_value_deep_copy(gKeyframeClipboard);
+								gKeyframeCount++;
+							}
+						}
+						keyframe_save_sidecar();
+						gKeyframeSuspendCapture = true;
+						keyframe_apply(gVideoCurrentFrame);
+						gKeyframeSuspendCapture = false;
+					}
+				}
+
+				// Navigate between keys
+				if (gKeyframeCount > 0)
+				{
+					ImGui::SameLine();
+					if (ImGui::Button("|< key"))
+					{
+						// Jump to first key
+						int bestFrame = gKeyframes[0].frame;
+						for (int i = 1; i < gKeyframeCount; i++)
+							if (gKeyframes[i].frame < bestFrame)
+								bestFrame = gKeyframes[i].frame;
+						get_video_frame(bestFrame);
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("< key"))
+					{
+						// Jump to prev key
+						int bestFrame = -1;
+						for (int i = 0; i < gKeyframeCount; i++)
+						{
+							if (gKeyframes[i].frame < gVideoCurrentFrame)
+							{
+								if (bestFrame < 0 || gKeyframes[i].frame > bestFrame)
+									bestFrame = gKeyframes[i].frame;
+							}
+						}
+						if (bestFrame >= 0) get_video_frame(bestFrame);
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("> key"))
+					{
+						// Jump to next key
+						int bestFrame = -1;
+						for (int i = 0; i < gKeyframeCount; i++)
+						{
+							if (gKeyframes[i].frame > gVideoCurrentFrame)
+							{
+								if (bestFrame < 0 || gKeyframes[i].frame < bestFrame)
+									bestFrame = gKeyframes[i].frame;
+							}
+						}
+						if (bestFrame >= 0) get_video_frame(bestFrame);
+					}
+					ImGui::SameLine();
+					if (ImGui::Button(">| key"))
+					{
+						// Jump to last key
+						int bestFrame = gKeyframes[0].frame;
+						for (int i = 1; i < gKeyframeCount; i++)
+							if (gKeyframes[i].frame > bestFrame)
+								bestFrame = gKeyframes[i].frame;
+						get_video_frame(bestFrame);
+					}
+				}
+
+				ImGui::SameLine();
+				ImGui::Text(" %d key%s", gKeyframeCount, gKeyframeCount == 1 ? "" : "s");
+			}
 
 		ImGui::Separator();
 		if (ImGui::Button("Export video..."))
@@ -2232,13 +2984,21 @@ int main(int aParamc, char**aParams)
 
 //			ImGui::SetNextWindowSize(ImVec2(828, 400));
 //			ImGui::Begin("Modifiers", 0, ImGuiWindowFlags_NoResize);
-			ImGui::SetNextWindowSize(ImVec2(828, ImGui::GetIO().DisplaySize.y-32));
+			ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.55f, ImGui::GetIO().DisplaySize.y-32));
 			ImGui::Begin("Modifiers", 0, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
 		}
 		ImGui::BeginChild("Mod");
+		int gDirtyPreUI = gDirty;
 		modifier_ui();
-		ImGui::EndChild();		
+		ImGui::EndChild();
 		ImGui::End();
+
+		// Auto-capture: if modifier UI changed gDirty from 0→1 in video mode
+		if (gVideoMode && gKeyframesLoaded && !gKeyframeSuspendCapture
+			&& gDirty == 1 && gDirtyPreUI == 0)
+		{
+			keyframe_upsert(gVideoCurrentFrame);
+		}
 
 		if (gOptTrackFile && !gVideoMode && gSourceImageName)
 		{
@@ -2283,6 +3043,23 @@ int main(int aParamc, char**aParams)
         glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui::Render();
+
+        // Video playback: auto-advance frames at the video's FPS
+        if (gVideoMode && gVideoPlaying && !gVideoExportActive && !gExportRunning)
+        {
+            Uint32 now = SDL_GetTicks();
+            Uint32 frameMs = (gVideoFps > 0.0) ? (Uint32)(1000.0 / gVideoFps) : 40;
+            if (now - gVideoPlayLastTick >= frameMs)
+            {
+                gVideoPlayLastTick = now;
+                int next = gVideoCurrentFrame + 1;
+                if (next < gVideoTotalFrames)
+                    get_video_frame(next);
+                else
+                    gVideoPlaying = false;
+            }
+        }
+
         SDL_GL_SwapWindow(window);
     }
 

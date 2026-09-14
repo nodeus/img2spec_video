@@ -1,4 +1,4 @@
-# Image Spectrumizer 5.2
+# Image Spectrumizer 5.3
 
 ![ScreenShot](https://raw.github.com/jarikomppa/img2spec/master/img2spec2.jpg)
 
@@ -17,6 +17,17 @@ Extended with video mode, pipe processing, and CLI batch features by nodeus.
 - Interactive preview with instant feedback
 - Save as PNG, raw binary, C header (`.h`), assembler include (`.inc`), or SCR (`.scr`)
 - Workspace save/load for non-destructive editing
+
+### New in 5.3 — Video Keyframes
+
+- **Per-frame keyframes** — save full modifier + device snapshots at specific frames on the timeline
+- **Auto-capture** — any parameter change on the current frame automatically creates/updates a keyframe
+- **Hold semantics** — keyframe settings apply from their frame until the next keyframe
+- **Timeline markers** — red diamond markers show keyframe positions on the timeline slider
+- **Navigation** — jump between keyframes with `|< key`, `< key`, `> key`, `>| key` buttons
+- **Sidecar storage** — keyframes saved as `<video>.keyframes.json` next to the video file
+- **Export support** — keyframes are passed to pipe mode during video export for per-frame parameter changes
+- **Full snapshots** — keyframes capture the entire state: modifier stack, device type, and all options
 
 ### New in 5.2 — Export Progress & UX
 

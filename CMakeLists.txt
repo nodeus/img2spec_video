@@ -78,7 +78,7 @@ endif ()
 add_definitions(-DIMGUI_INCLUDE_IMGUI_USER_INL)
 
 add_executable(img2spec WIN32 ${SOURCES})
-target_link_libraries(img2spec ${SDL2_LIBRARIES} ${OPENGL_LIBRARIES})
+target_link_libraries(img2spec -Wl,--whole-archive ${SDL2_MAIN_LIBRARY} -Wl,--no-whole-archive ${SDL2_LIBRARIES} ${OPENGL_LIBRARIES})
 
 if (WIN32)
     target_link_libraries(img2spec winmm imm32 version)

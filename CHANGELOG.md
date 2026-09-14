@@ -1,5 +1,25 @@
 # Changelog
 
+## 5.3 — Video Keyframes
+
+### New Features
+
+- **Video keyframes** — save full modifier + device snapshots at specific frames on the video timeline
+- **Auto-capture** — parameter changes on the current frame automatically create/update a keyframe
+- **Hold semantics** — keyframe settings apply from their frame until the next keyframe (no interpolation)
+- **Timeline markers** — red diamond markers show keyframe positions on the timeline slider
+- **Keyframe navigation** — jump between keyframes with `|< key`, `< key`, `> key`, `>| key` buttons
+- **Sidecar storage** — keyframes saved as `<video>.keyframes.json` alongside the video file
+- **Export with keyframes** — keyframes are passed to pipe mode via `--keys` flag during video export
+- **Full snapshots** — each keyframe captures the entire state: modifier stack composition, device type, and all device/modifier options
+
+### Internal
+
+- **Refactored serialization** — extracted `serialize_snapshot_to_json()` and `deserialize_snapshot_from_json()` helpers, used by workspace save/load, video export, and keyframe system
+- **`--keys <file>` flag** — new pipe mode argument to load keyframes for per-frame parameter switching during export
+
+---
+
 ## 5.2 — Export Progress & UX Improvements
 
 ### New Features
