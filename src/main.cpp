@@ -140,6 +140,7 @@ bool gKeyframeSuspendCapture = false;  // suppress auto-capture during apply/loa
 int gLastAppliedKeyframeIdx = -1;  // index of last applied key (for change detection)
 JSON_Value *gKeyframeClipboard = NULL;  // clipboard for copy/paste key params
 bool gOptInterpolateKeys = false;  // interpolate modifier parameters between keyframes
+int gVideoPendingFrame = -1;  // frame to load after ImGui::Render()
 
 int gPipeWidth = 0;   // --width for --pipe mode
 int gPipeHeight = 0;  // --height for --pipe mode
@@ -1008,6 +1009,7 @@ void get_video_frame(int frameNum)
 {
 	gDirty = 1;
 	gDirtyPic = 1;
+	gVideoCurrentFrame = frameNum;
 
 	if (gVideoWidth == 0 || gVideoHeight == 0) return;
 
@@ -1030,10 +1032,6 @@ void get_video_frame(int frameNum)
 	FILE *pipe = popen(cmd, "r");
 #endif
 	if (!pipe) return;
-
-	// Update frame counter immediately so the timeline slider reflects
-	// the requested position even if the decode pipe fails
-	gVideoCurrentFrame = frameNum;
 
 	unsigned char *buf = new unsigned char[vw * vh * 3];
 	size_t read = fread(buf, 1, vw * vh * 3, pipe);
@@ -2892,14 +2890,11 @@ int main(int aParamc, char**aParams)
 		{
 			ImGui::Separator();
 
-			int frame = gVideoCurrentFrame;
-			if (ImGui::SliderInt("##timeline", &frame, 0,
+			if (ImGui::SliderInt("##timeline", &gVideoCurrentFrame, 0,
 				(gVideoTotalFrames > 1) ? (gVideoTotalFrames - 1) : 1,
-				"Frame %d"))
+				"Frame %.0f"))
 			{
-				if (frame != gVideoCurrentFrame && frame >= 0 &&
-					frame < gVideoTotalFrames)
-					get_video_frame(frame);
+				gVideoPendingFrame = gVideoCurrentFrame;
 			}
 
 			// Draw keyframe markers on the timeline slider
@@ -3193,6 +3188,13 @@ int main(int aParamc, char**aParams)
         glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui::Render();
+
+        // Process pending frame load (outside ImGui render pass to avoid blocking the UI)
+        if (gVideoPendingFrame >= 0)
+        {
+            get_video_frame(gVideoPendingFrame);
+            gVideoPendingFrame = -1;
+        }
 
         // Video playback: auto-advance frames at the video's FPS
         if (gVideoMode && gVideoPlaying && !gVideoExportActive && !gExportRunning)
