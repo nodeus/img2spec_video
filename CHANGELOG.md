@@ -1,5 +1,23 @@
 # Changelog
 
+## 5.4 — Keyframe Interpolation & Timeline Fix
+
+### New Features
+
+- **Keyframe interpolation** — smooth modifier parameter transitions between keyframes, enabled via checkbox in keyframe controls or `--interpolate` CLI flag
+- Interpolation uses JSON numeric lerp; automatically falls back to step mode when device types or modifier stacks differ between keyframes
+
+### Bug Fixes
+
+- **Timeline frame display** — "Frame 0" was always shown during drag and playback due to undefined behavior in `ImFormatString` (`%d` format specifier used with float argument inside `SliderInt`); fixed by using `%.0f`
+
+### Improvements
+
+- `get_video_frame()` moved out of SliderInt callback to after `ImGui::Render()` to prevent UI blocking during drag
+- Pending frame mechanism: frame loads after ImGui render for smoother timeline interaction
+
+---
+
 ## 5.3 — Video Keyframes
 
 ### New Features
