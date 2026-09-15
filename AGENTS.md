@@ -65,7 +65,7 @@ Requires `mingw-w64-cmake` (e.g. Arch AUR).
 - No tests, no lint, no CI. Verify changes by building and running manually.
 - Commit messages mix English conventional prefixes (`docs:`, `chore:`) with Russian descriptions.
 - Static linking for MinGW cross-builds (`-static` in cmake flags).
-- Output binary is `img2spec` (CMake) or `img2spectrum.exe` (vcxproj).
+- Output binary is `img2spec_video.exe` (both CMake and vcxproj). Renamed from original `img2spec` to distinguish the fork.
 - **ImGui SliderInt format string**: `SliderInt` internally converts to float and calls `SliderFloat`, which formats via `ImFormatString(buf, ..., display_format, *v)` where `*v` is float. Using `%d` is **undefined behavior** (float passed where int expected). Always use `%.0f` for integer-like display of slider values.
 - **`get_video_frame()` is blocking**: spawns ffmpeg subprocess and reads raw frames synchronously. Must not be called inside ImGui widget callbacks (causes UI freeze). Use pending frame mechanism (`gVideoPendingFrame`) to defer loading after `ImGui::Render()`.
 - **`gVideoCurrentFrame`**: set at the start of `get_video_frame()` before any early returns, so it updates even on pipe failure.

@@ -77,17 +77,18 @@ endif ()
 
 add_definitions(-DIMGUI_INCLUDE_IMGUI_USER_INL)
 
-add_executable(img2spec WIN32 ${SOURCES})
-target_link_libraries(img2spec -Wl,--whole-archive ${SDL2_MAIN_LIBRARY} -Wl,--no-whole-archive ${SDL2_LIBRARIES} ${OPENGL_LIBRARIES})
+add_executable(img2spec_video WIN32 ${SOURCES})
+set_target_properties(img2spec_video PROPERTIES OUTPUT_NAME "img2spec_video")
+target_link_libraries(img2spec_video -Wl,--whole-archive ${SDL2_MAIN_LIBRARY} -Wl,--no-whole-archive ${SDL2_LIBRARIES} ${OPENGL_LIBRARIES})
 
 if (WIN32)
-    target_link_libraries(img2spec winmm imm32 version)
+    target_link_libraries(img2spec_video winmm imm32 version)
 endif ()
 
 if (GTK3_FOUND)
-    target_link_libraries(img2spec ${GTK3_LIBRARIES})
+    target_link_libraries(img2spec_video ${GTK3_LIBRARIES})
 endif ()
 
 if (APPKIT)
-    target_link_libraries(img2spec ${APPKIT})
+    target_link_libraries(img2spec_video ${APPKIT})
 endif ()
