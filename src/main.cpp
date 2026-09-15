@@ -139,6 +139,8 @@ bool gKeyframesLoaded = false;  // sidecar loaded for current video
 bool gKeyframeSuspendCapture = false;  // suppress auto-capture during apply/load
 int gLastAppliedKeyframeIdx = -1;  // index of last applied key (for change detection)
 JSON_Value *gKeyframeClipboard = NULL;  // clipboard for copy/paste key params
+bool gOptInterpolateKeys = false;  // interpolate modifier parameters between keyframes
+int gVideoPendingFrame = -1;  // frame to load after ImGui::Render()
 
 int gPipeWidth = 0;   // --width for --pipe mode
 int gPipeHeight = 0;  // --height for --pipe mode
@@ -1007,6 +1009,7 @@ void get_video_frame(int frameNum)
 {
 	gDirty = 1;
 	gDirtyPic = 1;
+	gVideoCurrentFrame = frameNum;
 
 	if (gVideoWidth == 0 || gVideoHeight == 0) return;
 
@@ -1029,10 +1032,6 @@ void get_video_frame(int frameNum)
 	FILE *pipe = popen(cmd, "r");
 #endif
 	if (!pipe) return;
-
-	// Update frame counter immediately so the timeline slider reflects
-	// the requested position even if the decode pipe fails
-	gVideoCurrentFrame = frameNum;
 
 	unsigned char *buf = new unsigned char[vw * vh * 3];
 	size_t read = fread(buf, 1, vw * vh * 3, pipe);
@@ -1182,9 +1181,148 @@ static int keyframe_find_effective(int frame)
 	return best;
 }
 
+// Find the first keyframe with frame > targetFrame, returns -1 if none
+static int keyframe_find_next(int targetFrame)
+{
+	int best = -1;
+	for (int i = 0; i < gKeyframeCount; i++)
+	{
+		if (gKeyframes[i].frame > targetFrame)
+		{
+			if (best < 0 || gKeyframes[i].frame < gKeyframes[best].frame)
+				best = i;
+		}
+	}
+	return best;
+}
+
+// Recursively interpolate numeric values between two JSON objects
+// Non-numeric, non-object values are kept from dst (earlier keyframe)
+static void json_interpolate(JSON_Object *dst, const JSON_Object *src, double t)
+{
+	size_t count = json_object_get_count(dst);
+	for (size_t i = 0; i < count; i++)
+	{
+		const char *key = json_object_get_name(dst, i);
+		JSON_Value *v1 = json_object_get_value(dst, key);
+		const JSON_Value *v2 = json_object_get_value(src, key);
+		if (!v2) continue;
+
+		if (json_value_get_type(v1) == JSONObject && json_value_get_type(v2) == JSONObject)
+		{
+			json_interpolate(json_object_get_object(dst, key),
+				json_object_get_object(src, key), t);
+		}
+		else if (json_value_get_type(v1) == JSONNumber && json_value_get_type(v2) == JSONNumber)
+		{
+			double a = json_value_get_number(v1);
+			double b = json_value_get_number(v2);
+			json_object_set_number(dst, key, a + t * (b - a));
+		}
+	}
+}
+
+// Build an interpolated snapshot between two surrounding keyframes.
+// Returns NULL if interpolation is not possible (fallback to step).
+static JSON_Value* keyframe_build_interpolated(int frame)
+{
+	int prevIdx = keyframe_find_effective(frame);
+	if (prevIdx < 0) return NULL;
+
+	int nextIdx = keyframe_find_next(frame);
+	if (nextIdx < 0) return NULL;
+
+	// Exactly on a keyframe — no interpolation needed
+	if (gKeyframes[prevIdx].frame == frame) return NULL;
+
+	double t = (double)(frame - gKeyframes[prevIdx].frame) /
+		(double)(gKeyframes[nextIdx].frame - gKeyframes[prevIdx].frame);
+
+	JSON_Object *rootA = json_value_get_object(gKeyframes[prevIdx].snapshot);
+	JSON_Object *rootB = json_value_get_object(gKeyframes[nextIdx].snapshot);
+
+	// Different devices — cannot interpolate, fall back to step
+	int devA = (int)json_object_dotget_number(rootA, "Config.gDeviceId");
+	int devB = (int)json_object_dotget_number(rootB, "Config.gDeviceId");
+	if (devA != devB) return NULL;
+
+	// Deep copy earlier keyframe as base
+	JSON_Value *result = json_value_deep_copy(gKeyframes[prevIdx].snapshot);
+	JSON_Object *root = json_value_get_object(result);
+
+	// Interpolate modifier stack parameters
+	for (int n = 0; n < 32; n++)
+	{
+		char path[256];
+		sprintf(path, "Stack.Item[%d]", n);
+
+		JSON_Object *itemA = json_object_dotget_object(rootA, path);
+		if (!itemA) break;  // no more modifiers in earlier keyframe
+		JSON_Object *itemB = json_object_dotget_object(rootB, path);
+		if (!itemB) break;  // modifier doesn't exist in later keyframe — stop
+
+		// Modifier types must match
+		int typeA = (int)json_object_get_number(itemA, "Type");
+		int typeB = (int)json_object_get_number(itemB, "Type");
+		if (typeA != typeB) break;
+
+		JSON_Object *itemDst = json_object_dotget_object(root, path);
+
+		// Iterate numeric fields of this modifier, skip non-interpolatable ones
+		size_t fieldCount = json_object_get_count(itemA);
+		for (size_t i = 0; i < fieldCount; i++)
+		{
+			const char *key = json_object_get_name(itemA, i);
+			JSON_Value *v1 = json_object_get_value(itemA, key);
+			const JSON_Value *v2 = json_object_get_value(itemB, key);
+			if (!v1 || !v2) continue;
+
+			// Skip: Name, Type, mEnabled, *_en booleans
+			if (strcmp(key, "Name") == 0 || strcmp(key, "Type") == 0 ||
+				strcmp(key, "mEnabled") == 0 || strstr(key, "_en") != NULL)
+				continue;
+
+			if (json_value_get_type(v1) == JSONNumber && json_value_get_type(v2) == JSONNumber)
+			{
+				double a = json_value_get_number(v1);
+				double b = json_value_get_number(v2);
+				json_object_set_number(itemDst, key, a + t * (b - a));
+			}
+		}
+	}
+
+	return result;
+}
+
+// Cache for interpolated keyframe (avoid re-apply on same frame)
+static int gLastInterpFrame = -1;
+
 // Apply effective keyframe's snapshot to live state (Device + Stack)
 static void keyframe_apply(int frame)
 {
+	if (gOptInterpolateKeys)
+	{
+		if (frame == gLastInterpFrame) return;
+		gLastInterpFrame = frame;
+		gLastAppliedKeyframeIdx = -1;  // invalidate step cache
+
+		JSON_Value *interp = keyframe_build_interpolated(frame);
+		if (interp)
+		{
+			gKeyframeSuspendCapture = true;
+			JSON_Object *root = json_value_get_object(interp);
+			deserialize_snapshot_from_json(root);
+			gDirty = 1;
+			gDirtyPic = 1;
+			gKeyframeSuspendCapture = false;
+			json_value_free(interp);
+			return;
+		}
+		// Interpolation not possible — fall through to step behavior
+	}
+
+	gLastInterpFrame = -1;  // invalidate interp cache
+
 	int idx = keyframe_find_effective(frame);
 	if (idx == gLastAppliedKeyframeIdx) return;  // no change
 	gLastAppliedKeyframeIdx = idx;
@@ -1573,6 +1711,8 @@ void start_video_export()
 		gVideoWidth, gVideoHeight);
 	if (keysPath[0])
 		sprintf(cmd + strlen(cmd), " --keys \"%s\"", keysPath);
+	if (gOptInterpolateKeys)
+		sprintf(cmd + strlen(cmd), " --interpolate");
 	sprintf(cmd + strlen(cmd), " | "
 		"ffmpeg -loglevel %s -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -framerate %s -i -"
 		" -progress \"%s\""
@@ -2174,6 +2314,8 @@ int main(int aParamc, char**aParams)
 						gPipeHeight = atoi(aParams[++i]);
 					else if (strcmp(aParams[i] + 2, "keys") == 0 && i + 1 < aParamc)
 						strcpy(gPipeKeysPath, aParams[++i]);
+					else if (strcmp(aParams[i] + 2, "interpolate") == 0)
+						gOptInterpolateKeys = 1;
 					continue;
 				}
 				switch (aParams[i][1])
@@ -2748,14 +2890,11 @@ int main(int aParamc, char**aParams)
 		{
 			ImGui::Separator();
 
-			int frame = gVideoCurrentFrame;
-			if (ImGui::SliderInt("##timeline", &frame, 0,
+			if (ImGui::SliderInt("##timeline", &gVideoCurrentFrame, 0,
 				(gVideoTotalFrames > 1) ? (gVideoTotalFrames - 1) : 1,
-				"Frame %d"))
+				"Frame %.0f"))
 			{
-				if (frame != gVideoCurrentFrame && frame >= 0 &&
-					frame < gVideoTotalFrames)
-					get_video_frame(frame);
+				gVideoPendingFrame = gVideoCurrentFrame;
 			}
 
 			// Draw keyframe markers on the timeline slider
@@ -2961,6 +3100,12 @@ int main(int aParamc, char**aParams)
 
 				ImGui::SameLine();
 				ImGui::Text(" %d key%s", gKeyframeCount, gKeyframeCount == 1 ? "" : "s");
+				ImGui::SameLine();
+				if (ImGui::Checkbox("Interpolate", &gOptInterpolateKeys))
+				{
+					gLastAppliedKeyframeIdx = -1;
+					gLastInterpFrame = -1;
+				}
 			}
 
 		ImGui::Separator();
@@ -3043,6 +3188,13 @@ int main(int aParamc, char**aParams)
         glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui::Render();
+
+        // Process pending frame load (outside ImGui render pass to avoid blocking the UI)
+        if (gVideoPendingFrame >= 0)
+        {
+            get_video_frame(gVideoPendingFrame);
+            gVideoPendingFrame = -1;
+        }
 
         // Video playback: auto-advance frames at the video's FPS
         if (gVideoMode && gVideoPlaying && !gVideoExportActive && !gExportRunning)
