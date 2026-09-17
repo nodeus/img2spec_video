@@ -184,6 +184,7 @@ enum MODIFIERS
 };
 
 #include "device.h"
+#include "imgui_utils.h"
 #include "modifier.h"
 
 Device *gDevice = 0;

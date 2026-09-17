@@ -76,6 +76,10 @@ Date: 2026-09-15. Version: 5.4.
 - **File**: `src/modifier.h:23-86`
 - **Problem**: `Modifier` base class directly calls ImGui. Impossible to use without GUI.
 - **Fix**: Move `complexsliderfloat()`/`complexsliderint()` to a separate utility. Keep `Modifier::ui()` as virtual but accept a render context.
+- **Status**: PARTIAL (2026-09-17, `src/imgui_utils.h`) — slider helpers extracted as free
+  functions, zero call-site changes (12 unqualified call sites resolve via include order).
+  `common()` and `ui()` signatures intentionally untouched: a render-context parameter
+  would churn all 14 modifiers for no functional gain without test coverage.
 
 ---
 

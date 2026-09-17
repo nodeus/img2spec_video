@@ -25,6 +25,7 @@ set(SOURCES
 
         src/device.h
         src/modifier.h
+        src/imgui_utils.h
         src/videopipeline.h
         src/keyframemanager.h
         src/exportmanager.h
