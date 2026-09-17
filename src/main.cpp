@@ -58,7 +58,7 @@ Still, if you find it useful, great!
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize.h"
 
-#define VERSION "5.4"
+#define VERSION "5.5"
 
 #define SERIALIZE(x) json_object_dotset_number(root, #x, x);
 #define DESERIALIZE(x) if (json_object_dotget_value(root, #x) != NULL) x = json_object_dotget_number(root, #x);

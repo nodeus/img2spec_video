@@ -1,5 +1,33 @@
 # Changelog
 
+## 5.5 — Pipe Leak Fix, Pre-allocated Buffers & Code Extraction
+
+### Bug Fixes
+
+- **Video decoding died after ~500 frames** — `_pclose()` on the custom `_open_osfhandle`+`_fdopen` pipe leaked one CRT fd per decoded frame; fd table (512) exhausted, frame loads and export silently failed. Fixed with `fclose()` in `get_video_frame()`, `run_pipe()` and export audio probe. Added DIAG logging on pipe failures
+- **BlurModifier memory leak** — per-frame `new float[]` without `delete[]` fixed via pre-allocated member buffer
+- Child ffmpeg processes now get NUL stdin plus `-nostdin` flag instead of inheriting the console
+
+### Improvements
+
+- **Pre-allocated modifier buffers** — Blur, Edge, ErrorDiffusion, MinMax and ScalePos reuse member buffers, reallocated only on resolution change
+- **Redundant `bitmap_to_float()` skipped** when an enabled ScalePos overwrites the buffer anyway
+- **`floor()` removed from `float_to_color()`** hot path
+- **Debounced keyframe sidecar writes** — disk write 500ms after last change instead of every slider drag
+- **Single combined ffprobe call** in `load_video()` with legacy 3-call fallback
+- **Cached histograms** — recomputed once per processed image
+- **Navigation buttons use pending-frame mechanism** — no UI blocking
+
+### Internal
+
+- **Extracted `src/videopipeline.h`** — `get_video_frame()`, `load_video()`, ffprobe parsing
+- **Extracted `src/keyframemanager.h`** — keyframe struct, globals and all `keyframe_*()` functions
+- **Extracted `src/exportmanager.h`** — `start/poll/cancel_video_export()` and export runtime state
+- **Extracted `src/imgui_utils.h`** — slider helpers moved out of `Modifier` base class
+- Virtual destructor added to `Modifier` base so member buffers free correctly
+
+---
+
 ## 5.4 — Keyframe Interpolation & Timeline Fix
 
 ### New Features
