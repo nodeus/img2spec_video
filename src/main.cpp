@@ -141,6 +141,8 @@ int gLastAppliedKeyframeIdx = -1;  // index of last applied key (for change dete
 JSON_Value *gKeyframeClipboard = NULL;  // clipboard for copy/paste key params
 bool gOptInterpolateKeys = false;  // interpolate modifier parameters between keyframes
 int gVideoPendingFrame = -1;  // frame to load after ImGui::Render()
+bool gKeyframesSidecarDirty = false;     // sidecar needs a disk write (debounced, 2.3)
+Uint32 gKeyframesSidecarLastChange = 0;  // SDL_GetTicks() of the last mark
 
 int gPipeWidth = 0;   // --width for --pipe mode
 int gPipeHeight = 0;  // --height for --pipe mode
@@ -164,6 +166,12 @@ float gBitmapProcFloat[1024 * 512 * 3];
 float gHistogramR[256];
 float gHistogramG[256];
 float gHistogramB[256];
+
+// Cached histograms (2.5): recomputed once per processed image, not every frame
+bool gHistCacheValid = false;
+float gHistCacheOrigR[256], gHistCacheOrigG[256], gHistCacheOrigB[256];
+float gHistCacheProcR[256], gHistCacheProcG[256], gHistCacheProcB[256];
+float gHistCacheSpecR[256], gHistCacheSpecG[256], gHistCacheSpecB[256];
 
 class Modifier;
 // Modifier stack
@@ -253,9 +261,10 @@ int float_to_color(float aR, float aG, float aB)
 	aG = (aG < 0) ? 0 : (aG > 1) ? 1 : aG;
 	aB = (aB < 0) ? 0 : (aB > 1) ? 1 : aB;
 
-	return ((int)floor(aR * 255) << 16) |
-		   ((int)floor(aG * 255) << 8) |
-		   ((int)floor(aB * 255) << 0);
+	// Inputs are clamped to [0,1] above, so truncation equals floor() here (2.2)
+	return ((int)(aR * 255) << 16) |
+		   ((int)(aG * 255) << 8) |
+		   ((int)(aB * 255) << 0);
 }
 
 void float_to_bitmap()
@@ -349,7 +358,22 @@ void process_image()
 {
 	build_applystack();
 
-	bitmap_to_float(gBitmapOrig);
+	// Skip the initial conversion when an enabled ScalePos is present and will
+	// overwrite the float buffer anyway by resampling from gSourceImageData (1.2).
+	// Otherwise the conversion result is the base for all other modifiers.
+	bool scalePosWillRun = false;
+	Modifier *probe = gModifierApplyStack;
+	while (probe)
+	{
+		if (probe->mEnabled && probe->gettype() == MOD_SCALEPOS)
+		{
+			scalePosWillRun = true;
+			break;
+		}
+		probe = probe->mApplyNext;
+	}
+	if (!scalePosWillRun || !gDirtyPic || !gSourceImageData)
+		bitmap_to_float(gBitmapOrig);
 
 	// ScalePos must be applied FIRST: it resamples from gSourceImageData into
 	// gBitmapOrig and calls bitmap_to_float, resetting all float data.
@@ -375,6 +399,8 @@ void process_image()
 	}
 
 	float_to_bitmap();
+
+	gHistCacheValid = false; // histogram window recomputes on demand (2.5)
 }
 
 
@@ -402,6 +428,13 @@ void calc_histogram(unsigned int *src)
 		gHistogramG[(src[i] >> 8) & 0xff]++;
 		gHistogramB[(src[i] >> 16) & 0xff]++;
 	}
+}
+
+static void histogram_to_cache(float *dR, float *dG, float *dB)
+{
+	memcpy(dR, gHistogramR, sizeof(gHistogramR));
+	memcpy(dG, gHistogramG, sizeof(gHistogramG));
+	memcpy(dB, gHistogramB, sizeof(gHistogramB));
 }
 
 // Should probably add to the end of the list instead of beginning..
@@ -985,7 +1018,10 @@ char *run_pipe(const char *cmd)
 	if (!f) return 0;
 	static char buf[4096];
 	buf[0] = 0;
-	fgets(buf, sizeof(buf), f);
+	// Read the full output (may span multiple lines for combined queries, 2.4)
+	size_t used = 0;
+	while (used + 2 < sizeof(buf) && fgets(buf + used, (int)(sizeof(buf) - used), f))
+		used = strlen(buf);
 #ifdef _WIN32
 	_pclose(f);
 #else
@@ -1004,6 +1040,7 @@ static void keyframe_clear();
 static void keyframe_load_sidecar();
 static void keyframe_apply(int frame);
 static void keyframe_save_sidecar();
+static void keyframe_flush_sidecar();
 
 void get_video_frame(int frameNum)
 {
@@ -1092,10 +1129,52 @@ void get_video_frame(int frameNum)
 	update_texture(gTextureOrig, gBitmapOrig);
 }
 
+// Parse combined ffprobe output (2.4):
+//   line 1: "width,height,r_frame_rate" (e.g. "640,480,25/1")
+//   line 2: "duration" (e.g. "60.000000")
+static bool parse_ffprobe_combined(const char *out, int *w, int *h, int *num, int *den, double *dur)
+{
+	if (!out || !w || !h || !num || !den || !dur) return false;
+
+	char line1[256];
+	const char *nl = strchr(out, '\n');
+	size_t n = nl ? (size_t)(nl - out) : strlen(out);
+	if (n == 0 || n >= sizeof(line1)) return false;
+	memcpy(line1, out, n);
+	line1[n] = 0;
+
+	char fps[64] = "";
+	int tw = 0, th = 0;
+	if (sscanf(line1, "%d,%d,%63s", &tw, &th, fps) != 3) return false;
+	if (tw <= 0 || th <= 0) return false;
+
+	int tnum = 0, tden = 1;
+	if (strchr(fps, '/'))
+	{
+		if (sscanf(fps, "%d/%d", &tnum, &tden) != 2 || tden <= 0) return false;
+	}
+	else
+	{
+		double f = atof(fps);
+		if (f <= 0) return false;
+		tnum = (int)(f * 1000 + 0.5);
+		tden = 1000;
+	}
+
+	if (!nl) return false;
+	double tdur = atof(nl + 1);
+	if (tdur <= 0) return false;
+
+	*w = tw; *h = th; *num = tnum; *den = tden; *dur = tdur;
+	return true;
+}
+
 void load_video(const char *filename)
 {
 	if (!filename) return;
 
+	// Flush any pending sidecar write for the previous video before switching
+	keyframe_flush_sidecar();
 	// Clear any existing keyframes from previous video
 	keyframe_clear();
 	gVideoPlaying = false;
@@ -1103,38 +1182,56 @@ void load_video(const char *filename)
 
 	char cmd[4096];
 	const char *res;
+	int vw = 0, vh = 0, num = 0, den = 1;
+	double dur = 0;
+	bool probed = false;
 
-	// ffprobe: resolution
-	sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 \"%s\"", filename);
+	// Single combined ffprobe call: resolution + fps + duration (2.4)
+	sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate -show_entries format=duration -of csv=p=0 \"%s\"", filename);
 	res = run_pipe(cmd);
-	if (!res) { printf("ffprobe error: can't get video info\n"); return; }
-	if (sscanf(res, "%d,%d", &gVideoWidth, &gVideoHeight) != 2) return;
+	if (res)
+		probed = parse_ffprobe_combined(res, &vw, &vh, &num, &den, &dur);
 
-	// ffprobe: duration
-	sprintf(cmd, "ffprobe -v error -show_entries format=duration -of csv=p=0 \"%s\"", filename);
-	res = run_pipe(cmd);
-	if (!res) return;
-	gVideoDuration = atof(res);
-
-	// ffprobe: frame rate
-	sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 \"%s\"", filename);
-	res = run_pipe(cmd);
-	if (!res) return;
-	// r_frame_rate is "num/den" or "num"
-	if (strchr(res, '/'))
+	if (!probed)
 	{
-		int num = 0, den = 1;
-		sscanf(res, "%d/%d", &num, &den);
-		gVideoFps = (den > 0) ? (double)num / den : 25.0;
-		gVideoFpsNum = (den > 0) ? num : 25000;
-		gVideoFpsDen = (den > 0) ? den : 1000;
+		// Fallback: three separate calls (legacy behavior)
+		// ffprobe: resolution
+		sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 \"%s\"", filename);
+		res = run_pipe(cmd);
+		if (!res) { printf("ffprobe error: can't get video info\n"); return; }
+		if (sscanf(res, "%d,%d", &vw, &vh) != 2) return;
+
+		// ffprobe: duration
+		sprintf(cmd, "ffprobe -v error -show_entries format=duration -of csv=p=0 \"%s\"", filename);
+		res = run_pipe(cmd);
+		if (!res) return;
+		dur = atof(res);
+
+		// ffprobe: frame rate
+		sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 \"%s\"", filename);
+		res = run_pipe(cmd);
+		if (!res) return;
+		// r_frame_rate is "num/den" or "num"
+		if (strchr(res, '/'))
+		{
+			num = 0; den = 1;
+			sscanf(res, "%d/%d", &num, &den);
+			if (den <= 0) { num = 25000; den = 1000; }
+		}
+		else
+		{
+			double f = atof(res);
+			num = (int)(f * 1000 + 0.5);
+			den = 1000;
+		}
 	}
-	else
-	{
-		gVideoFps = atof(res);
-		gVideoFpsNum = (int)(gVideoFps * 1000 + 0.5);
-		gVideoFpsDen = 1000;
-	}
+
+	gVideoWidth = vw;
+	gVideoHeight = vh;
+	gVideoDuration = dur;
+	gVideoFpsNum = num;
+	gVideoFpsDen = den;
+	gVideoFps = (den > 0) ? (double)num / den : 25.0;
 	if (gVideoFps <= 0) { gVideoFps = 25.0; gVideoFpsNum = 25000; gVideoFpsDen = 1000; }
 
 	gVideoTotalFrames = (int)(gVideoDuration * gVideoFps + 0.5);
@@ -1340,6 +1437,14 @@ static void keyframe_apply(int frame)
 	gKeyframeSuspendCapture = false;
 }
 
+// Mark sidecar for debounced write: the actual disk write happens in the
+// main loop ~500ms after the last change, not on every slider drag (2.3)
+static void keyframe_mark_sidecar_dirty()
+{
+	gKeyframesSidecarDirty = true;
+	gKeyframesSidecarLastChange = SDL_GetTicks();
+}
+
 // Create or update a keyframe at exact frame from current live state
 static void keyframe_upsert(int frame)
 {
@@ -1358,7 +1463,7 @@ static void keyframe_upsert(int frame)
 			build_applystack();
 			gKeyframes[i].snapshot = json_value_init_object();
 			serialize_snapshot_to_json(json_value_get_object(gKeyframes[i].snapshot));
-			keyframe_save_sidecar();
+			keyframe_mark_sidecar_dirty();
 			return;
 		}
 	}
@@ -1369,7 +1474,7 @@ static void keyframe_upsert(int frame)
 	gKeyframes[gKeyframeCount].snapshot = json_value_init_object();
 	serialize_snapshot_to_json(json_value_get_object(gKeyframes[gKeyframeCount].snapshot));
 	gKeyframeCount++;
-	keyframe_save_sidecar();
+	keyframe_mark_sidecar_dirty();
 }
 
 // Delete keyframe at exact frame
@@ -1386,7 +1491,7 @@ static void keyframe_delete(int frame)
 				gKeyframes[j] = gKeyframes[j + 1];
 			gKeyframeCount--;
 			gLastAppliedKeyframeIdx = -1;  // force re-evaluate
-			keyframe_save_sidecar();
+			keyframe_mark_sidecar_dirty();
 			return;
 		}
 	}
@@ -1441,6 +1546,16 @@ static void keyframe_save_sidecar()
 		fclose(ftest);
 	else
 		fprintf(stderr, "DIAG: keyframe_save_sidecar() FAILED to write '%s'\n", path);
+}
+
+// Write pending sidecar changes immediately (debounce flush, 2.3)
+static void keyframe_flush_sidecar()
+{
+	if (gKeyframesSidecarDirty)
+	{
+		keyframe_save_sidecar();
+		gKeyframesSidecarDirty = false;
+	}
 }
 
 // Load keyframes from sidecar JSON
@@ -2706,18 +2821,26 @@ int main(int aParamc, char**aParams)
 		{
 			if (ImGui::Begin("Histograms", &gWindowHistograms, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize))
 			{
-				calc_histogram(gBitmapOrig);
-				ImGui::PlotHistogram("###hist1", gHistogramR, 256, 0, 0, 0, 1024, ImVec2(256, 32)); ImGui::SameLine(); ImGui::Text(" "); ImGui::SameLine();
-				ImGui::PlotHistogram("###hist2", gHistogramG, 256, 0, 0, 0, 1024, ImVec2(256, 32)); ImGui::SameLine(); ImGui::Text(" "); ImGui::SameLine();
-				ImGui::PlotHistogram("###hist3", gHistogramB, 256, 0, 0, 0, 1024, ImVec2(256, 32));
-				calc_histogram(gBitmapProc);
-				ImGui::PlotHistogram("###hist4", gHistogramR, 256, 0, 0, 0, 1024, ImVec2(256, 32)); ImGui::SameLine(); ImGui::Text(" "); ImGui::SameLine();
-				ImGui::PlotHistogram("###hist5", gHistogramG, 256, 0, 0, 0, 1024, ImVec2(256, 32)); ImGui::SameLine(); ImGui::Text(" "); ImGui::SameLine();
-				ImGui::PlotHistogram("###hist6", gHistogramB, 256, 0, 0, 0, 1024, ImVec2(256, 32));
-				calc_histogram(gBitmapSpec);
-				ImGui::PlotHistogram("###hist7", gHistogramR, 256, 0, 0, 0, 1024, ImVec2(256, 32)); ImGui::SameLine(); ImGui::Text(" "); ImGui::SameLine();
-				ImGui::PlotHistogram("###hist8", gHistogramG, 256, 0, 0, 0, 1024, ImVec2(256, 32)); ImGui::SameLine(); ImGui::Text(" "); ImGui::SameLine();
-				ImGui::PlotHistogram("###hist9", gHistogramB, 256, 0, 0, 0, 1024, ImVec2(256, 32));
+				// Compute once per processed image; reuse while bitmaps are unchanged (2.5)
+				if (!gHistCacheValid)
+				{
+					calc_histogram(gBitmapOrig);
+					histogram_to_cache(gHistCacheOrigR, gHistCacheOrigG, gHistCacheOrigB);
+					calc_histogram(gBitmapProc);
+					histogram_to_cache(gHistCacheProcR, gHistCacheProcG, gHistCacheProcB);
+					calc_histogram(gBitmapSpec);
+					histogram_to_cache(gHistCacheSpecR, gHistCacheSpecG, gHistCacheSpecB);
+					gHistCacheValid = true;
+				}
+				ImGui::PlotHistogram("###hist1", gHistCacheOrigR, 256, 0, 0, 0, 1024, ImVec2(256, 32)); ImGui::SameLine(); ImGui::Text(" "); ImGui::SameLine();
+				ImGui::PlotHistogram("###hist2", gHistCacheOrigG, 256, 0, 0, 0, 1024, ImVec2(256, 32)); ImGui::SameLine(); ImGui::Text(" "); ImGui::SameLine();
+				ImGui::PlotHistogram("###hist3", gHistCacheOrigB, 256, 0, 0, 0, 1024, ImVec2(256, 32));
+				ImGui::PlotHistogram("###hist4", gHistCacheProcR, 256, 0, 0, 0, 1024, ImVec2(256, 32)); ImGui::SameLine(); ImGui::Text(" "); ImGui::SameLine();
+				ImGui::PlotHistogram("###hist5", gHistCacheProcG, 256, 0, 0, 0, 1024, ImVec2(256, 32)); ImGui::SameLine(); ImGui::Text(" "); ImGui::SameLine();
+				ImGui::PlotHistogram("###hist6", gHistCacheProcB, 256, 0, 0, 0, 1024, ImVec2(256, 32));
+				ImGui::PlotHistogram("###hist7", gHistCacheSpecR, 256, 0, 0, 0, 1024, ImVec2(256, 32)); ImGui::SameLine(); ImGui::Text(" "); ImGui::SameLine();
+				ImGui::PlotHistogram("###hist8", gHistCacheSpecG, 256, 0, 0, 0, 1024, ImVec2(256, 32)); ImGui::SameLine(); ImGui::Text(" "); ImGui::SameLine();
+				ImGui::PlotHistogram("###hist9", gHistCacheSpecB, 256, 0, 0, 0, 1024, ImVec2(256, 32));
 			}
 			ImGui::End();
 		}
@@ -2871,22 +2994,22 @@ int main(int aParamc, char**aParams)
 			}
 
 			ImGui::SameLine();
-			if (ImGui::Button("|<")) get_video_frame(0);
+			if (ImGui::Button("|<")) gVideoPendingFrame = 0;
 			ImGui::SameLine();
 			if (ImGui::Button("<"))
-				get_video_frame(std::max(0, gVideoCurrentFrame - 1));
+				gVideoPendingFrame = std::max(0, gVideoCurrentFrame - 1);
 			ImGui::SameLine();
 			if (ImGui::Button("-10"))
-				get_video_frame(std::max(0, gVideoCurrentFrame - 10));
+				gVideoPendingFrame = std::max(0, gVideoCurrentFrame - 10);
 			ImGui::SameLine();
 			if (ImGui::Button("+10"))
-				get_video_frame(std::min(gVideoTotalFrames - 1, gVideoCurrentFrame + 10));
+				gVideoPendingFrame = std::min(gVideoTotalFrames - 1, gVideoCurrentFrame + 10);
 			ImGui::SameLine();
 			if (ImGui::Button(">"))
-				get_video_frame(std::min(gVideoTotalFrames - 1, gVideoCurrentFrame + 1));
+				gVideoPendingFrame = std::min(gVideoTotalFrames - 1, gVideoCurrentFrame + 1);
 			ImGui::SameLine();
 			if (ImGui::Button(">|"))
-				get_video_frame(gVideoTotalFrames - 1);
+				gVideoPendingFrame = gVideoTotalFrames - 1;
 			ImGui::SameLine();
 			if (ImGui::Button(gVideoPlaying ? "||##play" : ">##play"))
 				gVideoPlaying = !gVideoPlaying;
@@ -2984,7 +3107,7 @@ int main(int aParamc, char**aParams)
 								gKeyframeCount++;
 							}
 						}
-						keyframe_save_sidecar();
+						keyframe_mark_sidecar_dirty();
 						gKeyframeSuspendCapture = true;
 						keyframe_apply(gVideoCurrentFrame);
 						gKeyframeSuspendCapture = false;
@@ -3002,7 +3125,7 @@ int main(int aParamc, char**aParams)
 						for (int i = 1; i < gKeyframeCount; i++)
 							if (gKeyframes[i].frame < bestFrame)
 								bestFrame = gKeyframes[i].frame;
-						get_video_frame(bestFrame);
+						gVideoPendingFrame = bestFrame;
 					}
 					ImGui::SameLine();
 					if (ImGui::Button("< key"))
@@ -3017,7 +3140,7 @@ int main(int aParamc, char**aParams)
 									bestFrame = gKeyframes[i].frame;
 							}
 						}
-						if (bestFrame >= 0) get_video_frame(bestFrame);
+						if (bestFrame >= 0) gVideoPendingFrame = bestFrame;
 					}
 					ImGui::SameLine();
 					if (ImGui::Button("> key"))
@@ -3032,7 +3155,7 @@ int main(int aParamc, char**aParams)
 									bestFrame = gKeyframes[i].frame;
 							}
 						}
-						if (bestFrame >= 0) get_video_frame(bestFrame);
+						if (bestFrame >= 0) gVideoPendingFrame = bestFrame;
 					}
 					ImGui::SameLine();
 					if (ImGui::Button(">| key"))
@@ -3042,7 +3165,7 @@ int main(int aParamc, char**aParams)
 						for (int i = 1; i < gKeyframeCount; i++)
 							if (gKeyframes[i].frame > bestFrame)
 								bestFrame = gKeyframes[i].frame;
-						get_video_frame(bestFrame);
+						gVideoPendingFrame = bestFrame;
 					}
 				}
 
@@ -3131,6 +3254,10 @@ int main(int aParamc, char**aParams)
 				
 		}
 
+		// Debounced keyframe sidecar write: flush ~500ms after the last change (2.3)
+		if (gKeyframesSidecarDirty && SDL_GetTicks() - gKeyframesSidecarLastChange >= 500)
+			keyframe_flush_sidecar();
+
         // Rendering
         glViewport(0, 0, (int)ImGui::GetIO().DisplaySize.x, (int)ImGui::GetIO().DisplaySize.y);
         glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
@@ -3162,6 +3289,9 @@ int main(int aParamc, char**aParams)
 
         SDL_GL_SwapWindow(window);
     }
+
+    // Don't lose keyframe edits made within the debounce window (2.3)
+    keyframe_flush_sidecar();
 
     // Cleanup
     if (!pipe_mode)

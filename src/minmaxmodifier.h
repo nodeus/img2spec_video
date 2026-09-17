@@ -6,6 +6,8 @@ public:
 	bool mMin;
 	bool mRounded;
 	int mOnce;
+	float *mBuf;  // pre-allocated working buffer (2.1)
+	int mBufSize;
 
 	virtual char *getname() { return "MinMax"; }
 
@@ -43,6 +45,13 @@ public:
 		mAreaX = 2;
 		mAreaY = 2;
 		mRounded = false;
+		mBuf = 0;
+		mBufSize = 0;
+	}
+
+	virtual ~MinmaxModifier()
+	{
+		delete[] mBuf;
 	}
 
 	virtual int ui()
@@ -98,7 +107,15 @@ public:
 	virtual void process()
 	{
 		int i, j;
-		float * buf = new float[gDevice->mYRes * gDevice->mXRes * 3];
+		// Reuse pre-allocated buffer; grow only when resolution changes (2.1)
+		int need = gDevice->mYRes * gDevice->mXRes * 3;
+		if (!mBuf || mBufSize != need)
+		{
+			delete[] mBuf;
+			mBuf = new float[need];
+			mBufSize = need;
+		}
+		float * buf = mBuf;
 		memcpy(buf, gBitmapProcFloat, gDevice->mYRes * gDevice->mXRes * 3 * sizeof(float));
 		
 		if (mMin)
@@ -168,6 +185,6 @@ public:
 			}
 		}
 
-		delete[] buf;
+		// (buffer is reused member storage now — freed in destructor)
 	}
 };

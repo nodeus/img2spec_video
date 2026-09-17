@@ -6,6 +6,8 @@ public:
 	int mDirection;
 	int mOnce;
 	float mErrorClamp;
+	float *mData;  // pre-allocated working buffer (2.1)
+	int mDataSize;
 
 	virtual char *getname() { return "ErrorDiffusionDither"; }
 
@@ -40,6 +42,13 @@ public:
 		mOnce = 0;
 		mDirection = 0;
 		mErrorClamp = 1;
+		mData = 0;
+		mDataSize = 0;
+	}
+
+	virtual ~ErrorDiffusionDitherModifier()
+	{
+		delete[] mData;
 	}
 
 	virtual int ui()
@@ -78,7 +87,15 @@ public:
 
 	virtual void process()
 	{
-		float *data = new float[gDevice->mXRes * gDevice->mYRes * 3];
+		// Reuse pre-allocated buffer; grow only when resolution changes (2.1)
+		int need = gDevice->mXRes * gDevice->mYRes * 3;
+		if (!mData || mDataSize != need)
+		{
+			delete[] mData;
+			mData = new float[need];
+			mDataSize = need;
+		}
+		float *data = mData;
 		memcpy(data, gBitmapProcFloat, sizeof(float) * gDevice->mXRes * gDevice->mYRes * 3);
 		int i, j;
 
@@ -258,7 +275,7 @@ public:
 			if (mG_en) gBitmapProcFloat[i * 3 + 1] += (data[i * 3 + 1] - gBitmapProcFloat[i * 3 + 1]) * mV;
 			if (mR_en) gBitmapProcFloat[i * 3 + 2] += (data[i * 3 + 2] - gBitmapProcFloat[i * 3 + 2]) * mV;
 		}
-		delete[] data;
+		// (buffer is reused member storage now — freed in destructor)
 	}
 
 };

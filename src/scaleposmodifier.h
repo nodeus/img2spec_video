@@ -5,6 +5,8 @@ public:
 	bool mHQ;
 	float mScale;
 	int mOnce;
+	unsigned int *mTemp;  // pre-allocated resample buffer (2.1)
+	int mTempSize;
 
 	virtual char *getname() { return "ScalePos"; }
 
@@ -40,6 +42,13 @@ public:
 		mScale = 1;
 		gDirtyPic = 1;
 		mOnce = 0;
+		mTemp = 0;
+		mTempSize = 0;
+	}
+
+	virtual ~ScalePosModifier()
+	{
+		delete[] mTemp;
 	}
 
 	virtual int ui()
@@ -81,7 +90,17 @@ public:
 			int i, j;
 			int h = (int)floor(gSourceImageY * mScale);
 			int w = (int)floor(gSourceImageX * mScale);
-			unsigned int *temp = new unsigned int[h * w];
+			// Reuse pre-allocated resample buffer; grow only when scaled size grows (2.1)
+			unsigned int *temp = 0;
+			if (h > 0 && w > 0)
+			{
+				if (!mTemp || mTempSize < h * w)
+				{
+					delete[] mTemp;
+					mTemp = new unsigned int[h * w];
+					mTempSize = h * w;
+				}
+				temp = mTemp;
 			if (mHQ)
 			{
 				stbir_resize_uint8(
@@ -98,6 +117,7 @@ public:
 					}
 				}
 			}
+			} // if (h > 0 && w > 0)
 
 			for (i = 0; i < gDevice->mYRes; i++)
 			{
@@ -114,7 +134,7 @@ public:
 					gBitmapOrig[i * gDevice->mXRes + j] = pix;
 				}
 			}
-			delete[] temp;
+			// (temp is reused member storage now — freed in destructor)
 
 			update_texture(gTextureOrig, gBitmapOrig);
 

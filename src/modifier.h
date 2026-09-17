@@ -20,6 +20,8 @@ public:
 		mB_en = true;
 	}
 
+	virtual ~Modifier() {}
+
 	int common(int aRGBControls = 1)
 	{
 		int ret = 0;

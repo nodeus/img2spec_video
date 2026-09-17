@@ -5,6 +5,8 @@ public:
 	int mAreaX, mAreaY;
 	bool mNegate;
 	int mOnce;
+	float *mBuf;   // pre-allocated working buffer (2.1), reused across process() calls
+	int mBufSize;
 
 	virtual char *getname() { return "Blur"; }
 
@@ -39,6 +41,13 @@ public:
 		mOnce = 0;
 		mAreaX = 3;
 		mAreaY = 3;
+		mBuf = 0;
+		mBufSize = 0;
+	}
+
+	virtual ~BlurModifier()
+	{
+		delete[] mBuf;
 	}
 
 	virtual int ui()
@@ -69,10 +78,20 @@ public:
 	virtual void process()
 	{
 		int i, j, c;
-		float * buf = new float[gDevice->mYRes * gDevice->mXRes * 3 * 3];
-		float * rbuf = buf + (gDevice->mXRes * gDevice->mYRes * 0);
-		float * gbuf = buf + (gDevice->mXRes * gDevice->mYRes * 1);
-		float * bbuf = buf + (gDevice->mXRes * gDevice->mYRes * 2);
+		int pixels = gDevice->mXRes * gDevice->mYRes;
+		// Reuse pre-allocated buffer; grow only when resolution changes (2.1).
+		// Also fixes the per-frame leak of the old `new float[]` without delete[] (1.1).
+		int need = pixels * 3;
+		if (!mBuf || mBufSize != need)
+		{
+			delete[] mBuf;
+			mBuf = new float[need];
+			mBufSize = need;
+		}
+		float * buf = mBuf;
+		float * rbuf = buf + (pixels * 0);
+		float * gbuf = buf + (pixels * 1);
+		float * bbuf = buf + (pixels * 2);
 
 		for (j = 0, c = 0; j < gDevice->mYRes; j++)
 		{

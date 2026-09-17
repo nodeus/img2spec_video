@@ -9,6 +9,9 @@ public:
 	float mFillColor[3];
 	float mDirection;
 	int mOnce;
+	float *mXEdge;  // pre-allocated working buffers (2.1)
+	float *mYEdge;
+	int mEdgeSize;
 
 	virtual char *getname() { return "Edge"; }
 
@@ -59,6 +62,15 @@ public:
 		mFillColor[1] = 0;
 		mFillColor[2] = 0;
 		mDirection = 0;
+		mXEdge = 0;
+		mYEdge = 0;
+		mEdgeSize = 0;
+	}
+
+	virtual ~EdgeModifier()
+	{
+		delete[] mXEdge;
+		delete[] mYEdge;
 	}
 
 	virtual int ui()
@@ -108,8 +120,18 @@ public:
 			 1,  2,  1
 		};
 
-		float *xedge = new float[3 * gDevice->mXRes * gDevice->mYRes];
-		float *yedge = new float[3 * gDevice->mXRes * gDevice->mYRes];
+		// Reuse pre-allocated buffers; grow only when resolution changes (2.1)
+		int need = 3 * gDevice->mXRes * gDevice->mYRes;
+		if (!mXEdge || !mYEdge || mEdgeSize != need)
+		{
+			delete[] mXEdge;
+			delete[] mYEdge;
+			mXEdge = new float[need];
+			mYEdge = new float[need];
+			mEdgeSize = need;
+		}
+		float *xedge = mXEdge;
+		float *yedge = mYEdge;
 
 		int i, j;
 		for (i = 0; i < gDevice->mYRes; i++)
@@ -234,9 +256,7 @@ public:
 				}
 			}
 		}
-
-		delete[] xedge;
-		delete[] yedge;
+		// (buffers are reused member storage now — freed in destructor)
 	}
 
 };
