@@ -108,11 +108,23 @@ Date: 2026-09-15. Version: 5.4.
 ## Execution Order
 
 ```
-Phase 1 (bugs)     → fix now, 1-2 hours
-Phase 2 (hot path) → next sprint, 2-3 days
-Phase 3 (arch)     → refactor over 1-2 weeks
-Phase 4 (advanced) → long-term, evaluate ROI
+Phase 1 (bugs)     → DONE (commit caeb09b, branch develop/feature/perf-phase1-2)
+Phase 2 (hot path) → DONE (commit caeb09b)
+Phase 3 (arch)     → 3.1 DONE (keyframemanager.h, 661e301),
+                      3.2 DONE (videopipeline.h, 5b0ec29),
+                      3.3 DONE (exportmanager.h, 5acedf1),
+                      3.4 OPEN (deferred: touches all 14 modifiers, no test coverage)
+Phase 4 (advanced) → DEFERRED (measured 2026-09-17: 30 frames pipe test,
+                      0.34s w/o keys vs 0.35s with JSON interpolation —
+                      round-trip ~0.3ms/frame vs ~11ms processing, no ROI)
 ```
+
+## Verification
+
+- Release build (VS2022, `build/Release/img2spec_video.exe`): 0 errors.
+- Pipe test (`--pipe`, 5-modifier stack incl. Blur/Edge/MinMax/ErrorDiffusion/ScalePos,
+  2 frames 256x192): output bit-identical to pre-change baseline.
+- Pipe test with `--keys` + `--interpolate`: output bit-identical to baseline.
 
 ## Notes
 
