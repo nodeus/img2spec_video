@@ -25,6 +25,9 @@ set(SOURCES
 
         src/device.h
         src/modifier.h
+        src/videopipeline.h
+        src/keyframemanager.h
+        src/exportmanager.h
 
         src/zxspectrumdevice.h
         src/zx3x64device.h
