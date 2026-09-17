@@ -7,6 +7,10 @@ void get_video_frame(int frameNum)
 {
 	gDirty = 1;
 	gDirtyPic = 1;
+	// Clamp to the valid range (defensive: seeking past EOF yields no output)
+	if (frameNum < 0) frameNum = 0;
+	if (gVideoTotalFrames > 0 && frameNum >= gVideoTotalFrames)
+		frameNum = gVideoTotalFrames - 1;
 	gVideoCurrentFrame = frameNum;
 
 	if (gVideoWidth == 0 || gVideoHeight == 0) return;
@@ -18,29 +22,43 @@ void get_video_frame(int frameNum)
 	char cmd[4096];
 #ifdef _WIN32
 	sprintf(cmd,
-		"ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 "
+		"ffmpeg -nostdin -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 "
 		"-s %dx%d -v quiet -",
 		sec, gVideoFilename, vw, vh);
 	FILE *pipe = _popen_no_window(cmd, "rb");
 #else
 	sprintf(cmd,
-		"ffmpeg -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 "
+		"ffmpeg -nostdin -ss %.3f -i \"%s\" -vframes 1 -f rawvideo -pix_fmt rgb24 "
 		"-s %dx%d -v quiet -",
 		sec, gVideoFilename, vw, vh);
 	FILE *pipe = popen(cmd, "r");
 #endif
-	if (!pipe) return;
+	if (!pipe)
+	{
+#ifdef _WIN32
+		fprintf(stderr, "DIAG: get_video_frame(%d) pipe open failed (error %lu)\n",
+			frameNum, GetLastError());
+#else
+		fprintf(stderr, "DIAG: get_video_frame(%d) pipe open failed\n", frameNum);
+#endif
+		return;
+	}
 
 	unsigned char *buf = new unsigned char[vw * vh * 3];
 	size_t read = fread(buf, 1, vw * vh * 3, pipe);
 #ifdef _WIN32
-	_pclose(pipe);
+	// NOTE: fclose, not _pclose: the stream comes from _open_osfhandle+_fdopen,
+	// not _popen. _pclose leaks one CRT fd per call here (fd table exhausts
+	// at 512 -> decoding dies after ~500 frames). fclose releases the fd.
+	fclose(pipe);
 #else
 	pclose(pipe);
 #endif
 
 	if (read != (size_t)(vw * vh * 3))
 	{
+		fprintf(stderr, "DIAG: get_video_frame(%d) short read %lu/%d\n",
+			frameNum, (unsigned long)read, vw * vh * 3);
 		delete[] buf;
 		return;
 	}

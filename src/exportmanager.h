@@ -416,7 +416,9 @@ void poll_video_export()
 				size_t len = strlen(probeResult);
 				if (len > 0 && probeResult[len-1] == '\n') probeResult[len-1] = 0;
 			}
-			_pclose(probe);
+			// NOTE: fclose, not _pclose (custom pipe, not _popen — see videopipeline.h).
+			// This whole function is _WIN32-only.
+			fclose(probe);
 		}
 
 		int hasAudio = (strstr(probeResult, "audio") != NULL);

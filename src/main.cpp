@@ -972,7 +972,13 @@ static FILE *_popen_no_window(const char *cmd, const char *mode)
 	si.dwFlags = STARTF_USESTDHANDLES;
 	si.hStdOutput = hWrite;
 	si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-	si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+	// Give the child NUL stdin instead of inheriting the console: ffmpeg would
+	// otherwise poll for interactive commands ('q') and may never exit,
+	// leaking a zombie process per spawned decode.
+	HANDLE hStdin = CreateFileA("NUL", GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+	BOOL haveNulStdin = (hStdin != INVALID_HANDLE_VALUE);
+	si.hStdInput = haveNulStdin ? hStdin : GetStdHandle(STD_INPUT_HANDLE);
 
 	char cmdline[4096];
 	_snprintf(cmdline, sizeof(cmdline), "cmd.exe /c \"%s\"", cmd);
@@ -981,10 +987,12 @@ static FILE *_popen_no_window(const char *cmd, const char *mode)
 	if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE,
 		CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
 	{
+		if (haveNulStdin) CloseHandle(hStdin);
 		CloseHandle(hRead); CloseHandle(hWrite);
 		return NULL;
 	}
 	CloseHandle(hWrite);
+	if (haveNulStdin) CloseHandle(hStdin); // child keeps its own dup
 	CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
 
 	int fd = _open_osfhandle((intptr_t)hRead, _O_BINARY);
@@ -1010,7 +1018,10 @@ char *run_pipe(const char *cmd)
 	while (used + 2 < sizeof(buf) && fgets(buf + used, (int)(sizeof(buf) - used), f))
 		used = strlen(buf);
 #ifdef _WIN32
-	_pclose(f);
+	// NOTE: fclose, not _pclose: the stream comes from _open_osfhandle+_fdopen,
+	// not _popen. _pclose leaks one CRT fd per call here (fd table exhausts
+	// at 512 -> decoding dies after ~500 frames). fclose releases the fd.
+	fclose(f);
 #else
 	pclose(f);
 #endif
