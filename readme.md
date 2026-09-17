@@ -1,4 +1,4 @@
-# Image Spectrumizer 5.4
+# Image Spectrumizer 5.5
 
 ![Screenshot](img2spec2.jpg)
 
