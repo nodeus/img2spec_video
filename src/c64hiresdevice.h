@@ -30,6 +30,9 @@ public:
 
 	virtual char *getname() { return "C64Hires"; }
 
+	// Raw dump: 8000 bitmap + 1000 attributes, no load address (not a .prg).
+	virtual const char *dumpext() { return "h64"; }
+
 
 	// Spectrum format data
 	unsigned char mAttributes[128 * 64 * 8 * 2]; // big enough for 8x1 attribs in 3x64 mode at 1024x512

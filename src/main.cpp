@@ -33,6 +33,8 @@ Still, if you find it useful, great!
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
+#else
+#include <sys/stat.h>
 #endif
 #include "platform/common.h"
 
@@ -125,6 +127,8 @@ char gOptExportFilename[1024] = "";
 char gOptExportExtraParams[1024] = "";
 int gOptExportLoglevel = 0;  // 0=info, 1=error, 2=warning, 3=verbose, 4=debug
 bool gOptExportCleanup = true;
+bool gOptExportDumpScr = false;  // save per-frame raw dump to temp/scr
+bool gOptExportDumpPng = false;  // save per-frame .png to temp/png
 
 int gVideoPendingFrame = -1;  // frame to load after ImGui::Render()
 bool gKeyframesSidecarDirty = false;     // sidecar needs a disk write (debounced, 2.3)
@@ -133,6 +137,8 @@ Uint32 gKeyframesSidecarLastChange = 0;  // SDL_GetTicks() of the last mark
 int gPipeWidth = 0;   // --width for --pipe mode
 int gPipeHeight = 0;  // --height for --pipe mode
 char gPipeKeysPath[MAX_PATH] = "";  // --keys for --pipe mode
+char gPipeDumpScrDir[MAX_PATH] = "";  // --dump-scr dir for --pipe mode
+char gPipeDumpPngDir[MAX_PATH] = "";  // --dump-png dir for --pipe mode
 
 // Texture handles
 GLuint gTextureOrig, gTextureProc, gTextureSpec, gTextureAttr, gTextureAttr2, gTextureBitm; 
@@ -1053,6 +1059,48 @@ int pipe_mode = 0;
 
 #include "exportmanager.h"
 
+static void pipe_ensure_dir(const char *path)
+{
+	if (!path || !path[0])
+		return;
+#ifdef _WIN32
+	CreateDirectoryA(path, NULL);
+#else
+	mkdir(path, 0755);
+#endif
+}
+
+// Save one processed frame: raw device dump (frame%06d.<dumpext>) and/or PNG.
+// Called from pipe_loop() after process_image() + gDevice->filter(), so
+// gBitmapSpec and the device bitmap/attributes hold the current frame.
+static void pipe_dump_frame(int frame)
+{
+	if (!gPipeDumpScrDir[0] && !gPipeDumpPngDir[0])
+		return;
+	char path[MAX_PATH + 64];
+	if (gPipeDumpScrDir[0])
+	{
+		_snprintf(path, sizeof(path), "%s" PATH_SEP "frame%06d.%s",
+			gPipeDumpScrDir, frame, gDevice->dumpext());
+		FILE *f = fopen(path, "wb");
+		if (f)
+		{
+			gDevice->savescr(f);
+			fclose(f);
+		}
+		else
+			fprintf(stderr, "pipe dump: cannot write '%s'\n", path);
+	}
+	if (gPipeDumpPngDir[0])
+	{
+		_snprintf(path, sizeof(path), "%s" PATH_SEP "frame%06d.png",
+			gPipeDumpPngDir, frame);
+		if (!stbi_write_png(path, gDevice->mXRes, gDevice->mYRes, 4,
+			gBitmapSpec, gDevice->mXRes * 4))
+			fprintf(stderr, "pipe dump: cannot write '%s'\n", path);
+	}
+}
+
 void pipe_loop()
 {
 	int dw = gDevice->mXRes;
@@ -1170,6 +1218,7 @@ void pipe_loop()
 
 		process_image();
 		gDevice->filter();
+		pipe_dump_frame(frameCount);
 		gDirty = 0;
 		gDirtyPic = 0;
 
@@ -1319,6 +1368,16 @@ int main(int aParamc, char**aParams)
 						gPipeHeight = atoi(aParams[++i]);
 					else if (strcmp(aParams[i] + 2, "keys") == 0 && i + 1 < aParamc)
 						strcpy(gPipeKeysPath, aParams[++i]);
+					else if (strcmp(aParams[i] + 2, "dump-scr") == 0 && i + 1 < aParamc)
+					{
+						strcpy(gPipeDumpScrDir, aParams[++i]);
+						pipe_ensure_dir(gPipeDumpScrDir);
+					}
+					else if (strcmp(aParams[i] + 2, "dump-png") == 0 && i + 1 < aParamc)
+					{
+						strcpy(gPipeDumpPngDir, aParams[++i]);
+						pipe_ensure_dir(gPipeDumpPngDir);
+					}
 					else if (strcmp(aParams[i] + 2, "interpolate") == 0)
 						gOptInterpolateKeys = 1;
 					continue;
@@ -1761,6 +1820,8 @@ int main(int aParamc, char**aParams)
 				ImGui::Combo("ffmpeg loglevel", &gOptExportLoglevel,
 					"info\0error\0warning\0verbose\0debug\0");
 				ImGui::Checkbox("Cleanup temporary files", &gOptExportCleanup);
+				ImGui::Checkbox("Save per-frame device dump to temp/scr", &gOptExportDumpScr);
+				ImGui::Checkbox("Save per-frame .png to temp/png", &gOptExportDumpPng);
 				const char *encoders[] = {"NVENC", "AMF", "x264"};
 				ImGui::Text("Settings: %s | x%d | Q%d",
 					encoders[gOptExportEncoder],

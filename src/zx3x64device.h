@@ -4,6 +4,9 @@ public:
 
 	virtual char *getname() { return "ZX3x64"; }
 
+	// Non-standard layout: 1 pixel set + 2 attribute sets (not a 6912 SCR).
+	virtual const char *dumpext() { return "3sc"; }
+
 	virtual int estimate_rgb(int c)
 	{
 		return gSpeccyPalette[rgb_to_speccy_pal(c, 16, 3 * 64)] | 0xff000000;

@@ -15,6 +15,10 @@ public:
 	virtual int palette_count() = 0;
 	virtual int palette_entry(int i) = 0;
 	virtual void savescr(FILE * f) = 0;
+	// File extension for per-frame raw dumps in video export (temp/scr).
+	// Default "scr" covers ZX Spectrum family; devices with a different
+	// on-disk layout override it (ZX3x64 -> "3sc", C64Hires -> "h64", ...).
+	virtual const char *dumpext() { return "scr"; }
 	virtual void saveh(FILE * f) = 0;
 	virtual void saveinc(FILE * f) = 0;
 	virtual void attr_bitm() = 0;

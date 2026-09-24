@@ -5,6 +5,9 @@ public:
 
 	virtual char *getname() { return "C64Multicolor"; }
 
+	// Raw dump: 8000 bitmap + 2001 attributes, no load address.
+	virtual const char *dumpext() { return "m64"; }
+
 
 	C64MulticolorDevice()
 	{

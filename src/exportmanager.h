@@ -16,6 +16,53 @@ static int gInExportFunc = 0;
 static int gLastExportCheckpoint = 0;
 static HANDLE gExportJob = NULL;
 
+// Delete all files inside dir (non-recursive) and remove the dir itself.
+// Used by Cleanup for temp/scr and temp/png which may hold thousands frames.
+static void export_delete_dir_files(const char *dir)
+{
+	char pattern[MAX_PATH + 16];
+	_snprintf(pattern, sizeof(pattern), "%s" PATH_SEP "*", dir);
+	WIN32_FIND_DATAA fd;
+	HANDLE h = FindFirstFileA(pattern, &fd);
+	if (h == INVALID_HANDLE_VALUE)
+		return;
+	do
+	{
+		if (fd.cFileName[0] == '.' && (fd.cFileName[1] == 0 ||
+			(fd.cFileName[1] == '.' && fd.cFileName[2] == 0)))
+			continue;
+		if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+		{
+			char fp[MAX_PATH + 64];
+			_snprintf(fp, sizeof(fp), "%s" PATH_SEP "%s", dir, fd.cFileName);
+			DeleteFileA(fp);
+		}
+	} while (FindNextFileA(h, &fd));
+	FindClose(h);
+	RemoveDirectoryA(dir);
+}
+
+// Remove the 5 service files plus per-frame dumps (temp/scr, temp/png).
+static void export_cleanup_temp_files()
+{
+	char delPath[MAX_PATH + 32];
+	_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_progress.txt", gStartupCwd);
+	DeleteFileA(delPath);
+	_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export.bat", gStartupCwd);
+	DeleteFileA(delPath);
+	_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export.isw", gStartupCwd);
+	DeleteFileA(delPath);
+	_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_keys.json", gStartupCwd);
+	DeleteFileA(delPath);
+	_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_stderr.log", gStartupCwd);
+	DeleteFileA(delPath);
+	char dumpDir[MAX_PATH + 32];
+	_snprintf(dumpDir, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "scr", gStartupCwd);
+	export_delete_dir_files(dumpDir);
+	_snprintf(dumpDir, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "png", gStartupCwd);
+	export_delete_dir_files(dumpDir);
+}
+
 static LONG WINAPI exportVectoredHandler(EXCEPTION_POINTERS *ep)
 {
 	if (gInExportFunc)
@@ -68,6 +115,20 @@ void start_video_export()
 	char tempDir[MAX_PATH];
 	_snprintf(tempDir, MAX_PATH, "%s" PATH_SEP "temp", gStartupCwd);
 	CreateDirectoryA(tempDir, NULL);
+
+	// Per-frame dump dirs for --dump-scr / --dump-png (checkboxes in Export window)
+	char dumpScrDir[MAX_PATH] = "";
+	char dumpPngDir[MAX_PATH] = "";
+	if (gOptExportDumpScr)
+	{
+		_snprintf(dumpScrDir, MAX_PATH, "%s" PATH_SEP "scr", tempDir);
+		CreateDirectoryA(dumpScrDir, NULL);
+	}
+	if (gOptExportDumpPng)
+	{
+		_snprintf(dumpPngDir, MAX_PATH, "%s" PATH_SEP "png", tempDir);
+		CreateDirectoryA(dumpPngDir, NULL);
+	}
 
 	// Get full path to this executable (has --pipe support)
 	char exePath[MAX_PATH];
@@ -183,6 +244,10 @@ void start_video_export()
 		sprintf(cmd + strlen(cmd), " --keys \"%s\"", keysPath);
 	if (gOptInterpolateKeys)
 		sprintf(cmd + strlen(cmd), " --interpolate");
+	if (gOptExportDumpScr)
+		sprintf(cmd + strlen(cmd), " --dump-scr \"%s\"", dumpScrDir);
+	if (gOptExportDumpPng)
+		sprintf(cmd + strlen(cmd), " --dump-png \"%s\"", dumpPngDir);
 	sprintf(cmd + strlen(cmd), " | "
 		"ffmpeg -loglevel %s -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -framerate %s -i -"
 		" -progress \"%s\""
@@ -327,19 +392,7 @@ void poll_video_export()
 		gRemuxRunning = 0;
 
 		if (gOptExportCleanup)
-		{
-			char delPath[MAX_PATH + 32];
-			_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_progress.txt", gStartupCwd);
-			DeleteFileA(delPath);
-			_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export.bat", gStartupCwd);
-			DeleteFileA(delPath);
-			_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export.isw", gStartupCwd);
-			DeleteFileA(delPath);
-			_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_keys.json", gStartupCwd);
-			DeleteFileA(delPath);
-			_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_stderr.log", gStartupCwd);
-			DeleteFileA(delPath);
-		}
+			export_cleanup_temp_files();
 
 		gVideoExportProgress = 1.0f;
 		gVideoExportActive = false;
@@ -467,19 +520,7 @@ void poll_video_export()
 		if (!gRemuxRunning)
 		{
 			if (gOptExportCleanup)
-			{
-				char delPath[MAX_PATH + 32];
-				_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_progress.txt", gStartupCwd);
-				DeleteFileA(delPath);
-				_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export.bat", gStartupCwd);
-				DeleteFileA(delPath);
-				_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export.isw", gStartupCwd);
-				DeleteFileA(delPath);
-				_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_keys.json", gStartupCwd);
-				DeleteFileA(delPath);
-				_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_stderr.log", gStartupCwd);
-				DeleteFileA(delPath);
-			}
+				export_cleanup_temp_files();
 
 			gVideoExportProgress = 1.0f;
 			gVideoExportActive = false;

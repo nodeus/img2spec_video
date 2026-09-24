@@ -84,6 +84,11 @@ img2spec_video input.png workspace.isw -p output.png
 | `--pipe --width W --height H` | Read raw RGB24 frames from stdin and write RGBA frames to stdout |
 | `--interpolate` | Enable keyframe interpolation in pipe mode |
 | `--keys <file>` | Load keyframes for per-frame parameter switching |
+| `--dump-scr <dir>` | Save every processed frame as raw device dump (`frame%06d.<ext>`) into `<dir>` |
+| `--dump-png <dir>` | Save every processed frame as PNG (`frame%06d.png`) into `<dir>` |
+
+Dump extensions depend on the device: ZX Spectrum / ZXHalfTile → `.scr`, ZX3x64 → `.3sc`
+(1 pixel set + 2 attribute sets, non-standard), C64Hires → `.h64`, C64Multicolor → `.m64`.
 
 `-p` writes a PNG image, not a video. `--batch-stdin` and `--headless` are not implemented. `--pipe` processes frames without opening the GUI. See the complete [macOS example](#macos) below.
 
@@ -98,6 +103,13 @@ ffmpeg (decode) -> img2spec_video --pipe (process) -> ffmpeg (encode + scale)
 - Final ffmpeg scales output to `device_resolution x scale_multiplier`
 - Windows GUI export re-muxes audio after video encoding; the macOS example includes audio during encoding
 - Video loading requires both ffmpeg and ffprobe in PATH; on Windows they can also be placed in the program folder
+- Export window checkboxes **Save per-frame device dump to temp/scr** and **Save per-frame .png to temp/png**
+  store every processed frame as `temp/scr/frameNNNNNN.<ext>` / `temp/png/frameNNNNNN.png`
+  (numbering matches `--keys` frames)
+- **Cleanup temporary files** removes the 5 service files (`img2spec_export.isw`,
+  `img2spec_export_keys.json`, `img2spec_export_progress.txt`, `img2spec_export.bat`,
+  `img2spec_export_stderr.log`) **plus** everything inside `temp/scr` and `temp/png`
+  (the directories themselves are removed too); with Cleanup off all of it stays in `temp/`
 
 ---
 

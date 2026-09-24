@@ -79,6 +79,11 @@ img2spec_video input.png workspace.isw -p output.png
 | `--pipe --width W --height H` | Чтение RAW RGB24 кадров из stdin и запись RGBA кадров в stdout |
 | `--interpolate` | Включить интерполяцию ключевых кадров в режиме пайпа |
 | `--keys <файл>` | Загрузить ключевые кадры для переключения параметров |
+| `--dump-scr <каталог>` | Сохранить каждый обработанный кадр как raw-дамп устройства (`frame%06d.<расш>`) в `<каталог>` |
+| `--dump-png <каталог>` | Сохранить каждый обработанный кадр как PNG (`frame%06d.png`) в `<каталог>` |
+
+Расширение дампа зависит от устройства: ZX Spectrum / ZXHalfTile → `.scr`, ZX3x64 → `.3sc`
+(1 набор пикселов + 2 набора атрибутов, нестандарт), C64Hires → `.h64`, C64Multicolor → `.m64`.
 
 `-p` записывает PNG, а не видео. Флаги `--batch-stdin` и `--headless` не реализованы. Режим `--pipe` обрабатывает кадры без открытия GUI. Полный [пример для macOS](#macos) приведён ниже.
 
@@ -93,6 +98,13 @@ ffmpeg (декодирование) -> img2spec_video --pipe (обработка
 - ffmpeg масштабирует выход до `разрешение_устройства x множитель`
 - GUI на Windows добавляет аудио после кодирования видео; пример для macOS добавляет его во время кодирования
 - Для загрузки видео нужны ffmpeg и ffprobe в PATH; на Windows их также можно разместить в папке программы
+- Чекбоксы окна экспорта **Save per-frame device dump to temp/scr** и **Save per-frame .png to temp/png**
+  сохраняют каждый обработанный кадр как `temp/scr/frameNNNNNN.<расш>` / `temp/png/frameNNNNNN.png`
+  (нумерация совпадает с кадрами `--keys`)
+- **Cleanup temporary files** удаляет 5 служебных файлов (`img2spec_export.isw`,
+  `img2spec_export_keys.json`, `img2spec_export_progress.txt`, `img2spec_export.bat`,
+  `img2spec_export_stderr.log`) **плюс** всё содержимое `temp/scr` и `temp/png`
+  (сами каталоги тоже удаляются); при выключенном Cleanup всё остаётся в `temp/`
 
 ---
 
