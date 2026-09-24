@@ -134,12 +134,16 @@ double distance_hsv(const FloatColor* a, const FloatColor* b) {
 double distance_ccir(const FloatColor* a, const FloatColor* b) {
     /* color distance taking human perception into account */
     // also see: https://groups.google.com/g/sci.engr.color/c/KJeeUkitd_A
-    double luma1 = (a->r * CCIR_WR + a->g * CCIR_WG + a->b * CCIR_WB) / 255000.0; // 255 * 1000
-    double luma2 = (b->r * CCIR_WR + b->g * CCIR_WG + b->b * CCIR_WB) / 255000.0; // 255 * 1000
+    // NOTE (img2spec local patch): FloatColor channels are 0..1 (see
+    // FloatColor_from_ByteColor), so the /255 normalization below was removed.
+    // With 0..1 inputs it suppressed the luminance term ~255x against the
+    // chroma term and changed palette-choice ordering vs the author's intent.
+    double luma1 = (a->r * CCIR_WR + a->g * CCIR_WG + a->b * CCIR_WB) / 1000.0;
+    double luma2 = (b->r * CCIR_WR + b->g * CCIR_WG + b->b * CCIR_WB) / 1000.0;
     double lumadiff = luma1 - luma2;
-    double diffR = (a->r - b->r) / 255.0;
-    double diffG = (a->g - b->g) / 255.0;
-    double diffB = (a->b - b->b) / 255.0;
+    double diffR = (a->r - b->r);
+    double diffG = (a->g - b->g);
+    double diffB = (a->b - b->b);
     return sqrt(diffR * diffR * (CCIR_WR / 1000.0) + diffG * diffG * (CCIR_WG / 1000.0) +
                 diffB * diffB * (CCIR_WB / 1000.0)) * CCIR_FAC +
            lumadiff * lumadiff;
@@ -194,8 +198,9 @@ double distance_lab2000(const FloatColor* a, const FloatColor* b, const FloatCol
             }
         }
     }
-    // calculate T
-    double hp_ave_deg = (hp_ave);
+    // calculate T (hp_ave is radians here; T needs degrees per CIEDE2000,
+    // cf. https://github.com/robertkist/libdither/issues/10)
+    double hp_ave_deg = RAD2DEG(hp_ave);
     double T = 1.0
                - 0.17 * cos(DEG2RAD(hp_ave_deg - 30.0))
                + 0.24 * cos(DEG2RAD(2.0 * hp_ave_deg))

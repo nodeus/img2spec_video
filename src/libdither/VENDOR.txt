@@ -6,3 +6,15 @@ Third-party attributions required by upstream:
 - kdtree (see kdtree/LICENSE): include license terms in source and binary distributions.
 - uthash (see uthash/LICENSE): include license terms in source distributions.
 Do not edit vendored files; img2spec integration lives in src/dither_bridge.h.
+Exception (local patches in color_models.c, kept minimal and upstreamable):
+- distance_lab2000: hp_ave (radians) converted to degrees via RAD2DEG before
+  T / delta_theta (was used as degrees directly). Upstream issue
+  https://github.com/robertkist/libdither/issues/10. Verified against the
+  Sharma/Wu/Dalal 2005 reference dataset (33 pairs, kL=kC=kH=1): before the
+  fix 23/33 pairs failed (max err 6.63), after the fix 33/33 pass (max err
+  < 1e-4). Hue sweep L=50/C=40 showed up to 29% relative error before.
+- distance_ccir: removed /255 normalization (divisors 255000->1000, channel
+  diffs unscaled) because FloatColor channels are 0..1, not 0..255. The old
+  form suppressed the luminance term ~255x vs the chroma term and flipped
+  palette-choice ordering vs the author's intent (demonstrated by exhaustive
+  coarse-grid comparison: fixed 0..1 ordering == original byte-scale ordering).
