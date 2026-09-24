@@ -3,11 +3,12 @@
 // video/keyframe state, the device, modifier stack and pipe-mode helpers.
 #pragma once
 
+static int gExportRunning = 0;
+
 #ifdef _WIN32
 #include <windows.h>
 static PROCESS_INFORMATION gExportProc;
 static HANDLE gExportStderrRead = NULL;
-static int gExportRunning = 0;
 static long gExportLogPos = 0;
 static int gRemuxRunning = 0;
 static PROCESS_INFORMATION gRemuxProc = {0};
@@ -20,7 +21,7 @@ static LONG WINAPI exportVectoredHandler(EXCEPTION_POINTERS *ep)
 	if (gInExportFunc)
 	{
 		DWORD code = ep->ExceptionRecord->ExceptionCode;
-		const char *crashLog = "\\img2spec_crash.log";
+		const char *crashLog = PATH_SEP "img2spec_crash.log";
 		char logPath[MAX_PATH];
 		_snprintf(logPath, MAX_PATH, "%s%s", gStartupCwd, crashLog);
 		FILE *cf = fopen(logPath, "a");
@@ -65,7 +66,7 @@ void start_video_export()
 #ifdef _WIN32
 	// Ensure temp/ subdirectory exists in startup CWD
 	char tempDir[MAX_PATH];
-	_snprintf(tempDir, MAX_PATH, "%s\\temp", gStartupCwd);
+	_snprintf(tempDir, MAX_PATH, "%s" PATH_SEP "temp", gStartupCwd);
 	CreateDirectoryA(tempDir, NULL);
 
 	// Get full path to this executable (has --pipe support)
@@ -74,7 +75,7 @@ void start_video_export()
 
 	// Save current workspace (modifiers + device) to temp file
 	char workspacePath[MAX_PATH];
-	_snprintf(workspacePath, MAX_PATH, "%s\\img2spec_export.isw", tempDir);
+	_snprintf(workspacePath, MAX_PATH, "%s" PATH_SEP "img2spec_export.isw", tempDir);
 
 	fprintf(stderr, "DIAG: export checkpoint 1 - build_applystack\n");
 	gLastExportCheckpoint = 1;
@@ -99,7 +100,7 @@ void start_video_export()
 	json_value_free(root_value);
 
 	char exportAbsPath[MAX_PATH];
-	_snprintf(exportAbsPath, MAX_PATH, "%s\\%s", gStartupCwd, gOptExportFilename);
+	_snprintf(exportAbsPath, MAX_PATH, "%s" PATH_SEP "%s", gStartupCwd, gOptExportFilename);
 
 	// Framerate string: -r 60 or -r 24000/1001
 	char fpsStr[32];
@@ -114,7 +115,7 @@ void start_video_export()
 	const char *loglevelStr = loglevel_names[loglevel_idx];
 
 	char progressPath[MAX_PATH + 32];
-	_snprintf(progressPath, MAX_PATH + 32, "%s\\img2spec_export_progress.txt", tempDir);
+	_snprintf(progressPath, MAX_PATH + 32, "%s" PATH_SEP "img2spec_export_progress.txt", tempDir);
 	FILE *pf = fopen(progressPath, "w");
 	if (pf) fclose(pf);
 
@@ -122,7 +123,7 @@ void start_video_export()
 	char keysPath[MAX_PATH] = "";
 	if (gKeyframeCount > 0)
 	{
-		_snprintf(keysPath, MAX_PATH, "%s\\img2spec_export_keys.json", tempDir);
+		_snprintf(keysPath, MAX_PATH, "%s" PATH_SEP "img2spec_export_keys.json", tempDir);
 		// Write keyframes to temp file
 		JSON_Value *kv = json_value_init_object();
 		JSON_Object *ko = json_value_get_object(kv);
@@ -161,7 +162,7 @@ void start_video_export()
 	gLastExportCheckpoint = 51;
 	{
 		char _dlog[MAX_PATH];
-		_snprintf(_dlog, MAX_PATH, "%s\\img2spec_crash.log", gStartupCwd);
+		_snprintf(_dlog, MAX_PATH, "%s" PATH_SEP "img2spec_crash.log", gStartupCwd);
 		FILE *_df = fopen(_dlog, "a");
 		if (_df) {
 			fprintf(_df, "DIAG args: loglevel=%p video=%p exe=%p ws=%p keys=%p fps=%p progress=%p gDevice=%p gVideoWidth=%d gVideoHeight=%d gOptExportScale=%d gOptExportFilename=%p gOptExportEncoder=%d gOptExportQuality=%d\n",
@@ -239,10 +240,10 @@ void start_video_export()
 	// Write batch file (needed for cmd.exe pipeline with |)
 	// Use group redirect 2>>"log" (... ) to capture ALL stderr (cmd.exe + pipe processes)
 	char logPath[MAX_PATH + 32];
-	_snprintf(logPath, MAX_PATH + 32, "%s\\img2spec_export_stderr.log", tempDir);
+	_snprintf(logPath, MAX_PATH + 32, "%s" PATH_SEP "img2spec_export_stderr.log", tempDir);
 
 	char batchPath[MAX_PATH];
-	_snprintf(batchPath, MAX_PATH, "%s\\img2spec_export.bat", tempDir);
+	_snprintf(batchPath, MAX_PATH, "%s" PATH_SEP "img2spec_export.bat", tempDir);
 
 	FILE *f = fopen(batchPath, "w");
 	if (!f)
@@ -328,15 +329,15 @@ void poll_video_export()
 		if (gOptExportCleanup)
 		{
 			char delPath[MAX_PATH + 32];
-			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_progress.txt", gStartupCwd);
+			_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_progress.txt", gStartupCwd);
 			DeleteFileA(delPath);
-			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export.bat", gStartupCwd);
+			_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export.bat", gStartupCwd);
 			DeleteFileA(delPath);
-			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export.isw", gStartupCwd);
+			_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export.isw", gStartupCwd);
 			DeleteFileA(delPath);
-			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_keys.json", gStartupCwd);
+			_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_keys.json", gStartupCwd);
 			DeleteFileA(delPath);
-			_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_stderr.log", gStartupCwd);
+			_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_stderr.log", gStartupCwd);
 			DeleteFileA(delPath);
 		}
 
@@ -351,7 +352,7 @@ void poll_video_export()
 	{
 		// Read ffmpeg -progress file to extract real progress
 		char progPath[MAX_PATH + 32];
-		_snprintf(progPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_progress.txt", gStartupCwd);
+		_snprintf(progPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_progress.txt", gStartupCwd);
 
 		FILE *pf = fopen(progPath, "r");
 		if (pf)
@@ -432,9 +433,9 @@ void poll_video_export()
 			strcat(tmpPath, "_tmp.mp4");
 
 			char exportAbsPath[MAX_PATH];
-			_snprintf(exportAbsPath, MAX_PATH, "%s\\%s", gStartupCwd, gOptExportFilename);
+			_snprintf(exportAbsPath, MAX_PATH, "%s" PATH_SEP "%s", gStartupCwd, gOptExportFilename);
 			char tmpAbsPath[MAX_PATH];
-			_snprintf(tmpAbsPath, MAX_PATH, "%s\\%s", gStartupCwd, tmpPath);
+			_snprintf(tmpAbsPath, MAX_PATH, "%s" PATH_SEP "%s", gStartupCwd, tmpPath);
 
 			static const char *rlognames[] = {"info", "error", "warning", "verbose", "debug"};
 			int ridx = gOptExportLoglevel;
@@ -468,15 +469,15 @@ void poll_video_export()
 			if (gOptExportCleanup)
 			{
 				char delPath[MAX_PATH + 32];
-				_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_progress.txt", gStartupCwd);
+				_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_progress.txt", gStartupCwd);
 				DeleteFileA(delPath);
-				_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export.bat", gStartupCwd);
+				_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export.bat", gStartupCwd);
 				DeleteFileA(delPath);
-				_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export.isw", gStartupCwd);
+				_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export.isw", gStartupCwd);
 				DeleteFileA(delPath);
-				_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_keys.json", gStartupCwd);
+				_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_keys.json", gStartupCwd);
 				DeleteFileA(delPath);
-				_snprintf(delPath, MAX_PATH + 32, "%s\\temp\\img2spec_export_stderr.log", gStartupCwd);
+				_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_stderr.log", gStartupCwd);
 				DeleteFileA(delPath);
 			}
 

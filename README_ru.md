@@ -48,9 +48,11 @@ PNG, бинарный SCR (`.scr`), C-заголовок (`.h`), ассембл�
 - Таймлайн с перемоткой по кадрам
 - Воспроизведение/пауза, кнопки пропуска кадров
 - Все модификаторы применяются к каждому кадру в реальном времени
-- Экспорт: NVIDIA NVENC (HEVC), AMD AMF (HEVC) или x264 (H.264)
+- Экспорт из GUI на Windows: NVIDIA NVENC (HEVC), AMD AMF (HEVC) или x264 (H.264)
 - Настройка качества (CRF/QP) и множителя масштаба (1x-32x)
 - Аудио мультиплексируется из источника после экспорта
+
+Экспорт из GUI, его прогресс и отмена пока реализованы только на Windows. На macOS используйте [пайп в Terminal](#macos): кнопка **Start export** в GUI не запускает экспорт.
 
 ### Ключевые кадры видео
 
@@ -65,7 +67,7 @@ PNG, бинарный SCR (`.scr`), C-заголовок (`.h`), ассембл�
 ### CLI и режим пайпа
 
 ```
-img2spec input.png workspace.isw -p output.png
+img2spec_video input.png workspace.isw -p output.png
 ```
 
 | Флаг | Описание |
@@ -74,21 +76,23 @@ img2spec input.png workspace.isw -p output.png
 | `-h <файл>` | Сохранить C-заголовок |
 | `-i <файл>` | Сохранить ассемблер-include |
 | `-s <файл>` | Сохранить SCR |
-| `--pipe --width W --height H` | Обработка RAW RGB24 кадров через stdin/stdout |
+| `--pipe --width W --height H` | Чтение RAW RGB24 кадров из stdin и запись RGBA кадров в stdout |
 | `--interpolate` | Включить интерполяцию ключевых кадров в режиме пайпа |
 | `--keys <файл>` | Загрузить ключевые кадры для переключения параметров |
-| `--batch-stdin` | Пакетная обработка (JSON-строки из stdin) |
+
+`-p` записывает PNG, а не видео. Флаги `--batch-stdin` и `--headless` не реализованы. Режим `--pipe` обрабатывает кадры без открытия GUI. Полный [пример для macOS](#macos) приведён ниже.
 
 ### Пайп экспорта видео
 
 ```
-ffmpeg (декодирование) -> img2spec --pipe (обработка) -> ffmpeg (кодирование + масштабирование)
+ffmpeg (декодирование) -> img2spec_video --pipe (обработка) -> ffmpeg (кодирование + масштабирование)
 ```
 
 - Кадры передаются через анонимные пайпы (без записи на диск)
-- img2spec обрабатывает в разрешении устройства (например, 256x384)
+- img2spec_video обрабатывает кадры в разрешении устройства (256x192 для ZX Spectrum по умолчанию)
 - ffmpeg масштабирует выход до `разрешение_устройства x множитель`
-- Аудио мультиPLEXируется из источника
+- GUI на Windows добавляет аудио после кодирования видео; пример для macOS добавляет его во время кодирования
+- Для загрузки видео нужны ffmpeg и ffprobe в PATH; на Windows их также можно разместить в папке программы
 
 ---
 
@@ -103,6 +107,38 @@ make
 ```
 
 Зависимости: SDL2, OpenGL. На Linux: GTK3. На macOS: AppKit. Вендорные C-исходники libdither требуют C11 или новее (в CMakeLists задан `C_STANDARD 11`; легаси-тулсет v120 их не соберёт — используйте решение, сгенерированное CMake).
+
+### macOS
+
+При необходимости установите Xcode Command Line Tools (`xcode-select --install`). Если Homebrew уже установлен, выполните из корня репозитория:
+
+```bash
+brew install cmake sdl2 ffmpeg
+cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release
+cmake --build build-macos -j 4
+./build-macos/img2spec_video
+```
+
+Запускайте программу из Terminal, чтобы она получила PATH с ffmpeg и ffprobe из Homebrew. OpenGL и AppKit входят в macOS SDK. Каталог `build-macos/` исключён из Git.
+
+Этот пример для Terminal изменяет размер входных кадров до 256x192 и частоту до 25 кадров/с, конвертирует их в стандартный ZX Spectrum и увеличивает результат до 512x384. Для кодирования используется CPU x264; первая аудиодорожка источника добавляется, если она есть. Выполните команды из корня репозитория в zsh или bash, заменив `input.mp4` на путь к видео:
+
+```bash
+set -o pipefail
+input="input.mp4"
+
+ffmpeg -nostdin -i "$input" -map 0:v:0 \
+  -vf "fps=25,scale=256:192" -f rawvideo -pix_fmt rgb24 - |
+./build-macos/img2spec_video --pipe --width 256 --height 192 |
+ffmpeg -nostdin -f rawvideo -pix_fmt rgba \
+  -s 256x192 -framerate 25 -i - -i "$input" \
+  -map 0:v:0 -map '1:a:0?' \
+  -vf "scale=512:384:flags=neighbor" \
+  -c:v libx264 -crf 17 -pix_fmt yuv420p \
+  -c:a aac -shortest output.mp4
+```
+
+Для сохранённых модификаторов добавьте `workspace.isw` перед `--pipe`. Значения `--width` и `--height` должны совпадать с размером кадров на выходе декодера, а `-s` у последнего ffmpeg — с разрешением устройства из workspace. Чтобы воспроизвести настройки для исходного видео, уберите `-vf "fps=25,scale=256:192"` у декодера, укажите исходные размеры декодированных кадров и задайте исходную частоту в `-framerate` (например, `24000/1001`). Это также сохраняет нумерацию кадров для `--keys "input.mp4.keyframes.json"`; для интерполяции добавьте `--interpolate`. Разрешение устройства должно оставаться постоянным на протяжении экспорта.
 
 ### Visual Studio
 

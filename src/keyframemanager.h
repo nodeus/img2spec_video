@@ -26,7 +26,7 @@ static void keyframe_sidecar_path(char *out, int outSize)
 	const char *base = strrchr(gVideoFilename, '\\');
 	if (!base) base = strrchr(gVideoFilename, '/');
 	if (base) base++; else base = gVideoFilename;
-	_snprintf(out, outSize, "%s\\%s.keyframes.json", gStartupCwd, base);
+	_snprintf(out, outSize, "%s" PATH_SEP "%s.keyframes.json", gStartupCwd, base);
 }
 
 // Find effective keyframe index for a given frame (max frame <= target)

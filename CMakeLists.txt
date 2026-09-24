@@ -123,7 +123,10 @@ add_executable(img2spec_video WIN32 ${SOURCES})
 set_target_properties(img2spec_video PROPERTIES OUTPUT_NAME "img2spec_video")
 # See LIBDITHER_SOURCES above: vendored C code requires C11.
 set_target_properties(img2spec_video PROPERTIES C_STANDARD 11)
-target_link_libraries(img2spec_video -Wl,--whole-archive ${SDL2_MAIN_LIBRARY} -Wl,--no-whole-archive ${SDL2_LIBRARIES} ${OPENGL_LIBRARIES})
+if (WIN32)
+    target_link_libraries(img2spec_video -Wl,--whole-archive ${SDL2_MAIN_LIBRARY} -Wl,--no-whole-archive)
+endif ()
+target_link_libraries(img2spec_video ${SDL2_LIBRARIES} ${OPENGL_LIBRARIES})
 
 if (WIN32)
     target_link_libraries(img2spec_video winmm imm32 version)

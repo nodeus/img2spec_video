@@ -1205,7 +1205,7 @@ int main(int aParamc, char**aParams)
 
 	// Auto-load conv.isw if present in startup directory
 	char convPath[MAX_PATH];
-	_snprintf(convPath, MAX_PATH, "%s\\conv.isw", gStartupCwd);
+	_snprintf(convPath, MAX_PATH, "%s" PATH_SEP "conv.isw", gStartupCwd);
 	if (GetFileAttributesA(convPath) != INVALID_FILE_ATTRIBUTES)
 	{
 		fprintf(stderr, "DIAG: main() auto-loading '%s'\n", convPath);

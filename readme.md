@@ -4,7 +4,7 @@
 
 GUI tool for converting images to ZX Spectrum and retro-platform formats, with **video processing**, **keyframe interpolation**, **CLI pipe mode** and **libdither-powered dithering** (19 error-diffusion kernels, 43 ordered matrices, 10 color-distance modes, mono dithering families).
 
-Originally by [Jari Komppa](https://github.com/jarikomppa/img2spec). Extended with video mode, keyframes, CLI batch/pipe, and export pipeline by [nodeus](https://nodeus.ru).
+Originally by [Jari Komppa](https://github.com/jarikomppa/img2spec). Extended with video mode, keyframes, CLI pipe mode, and export pipeline by [nodeus](https://nodeus.ru).
 
 **[Описание на русском языке / Russian description](README_ru.md)**
 
@@ -52,9 +52,11 @@ PNG, raw binary SCR (`.scr`), C header (`.h`), assembler include (`.inc`)
 - Timeline slider with frame-by-frame navigation
 - Play/pause with forward/backward skip buttons
 - All modifiers apply to every frame in real time
-- Export with NVIDIA NVENC (HEVC), AMD AMF (HEVC), or software x264 (H.264)
+- GUI export on Windows with NVIDIA NVENC (HEVC), AMD AMF (HEVC), or software x264 (H.264)
 - Configurable quality (CRF/QP) and scale multiplier (1x-32x)
 - Audio re-muxed from source after export
+
+GUI export, progress, and cancellation are currently implemented only on Windows. On macOS, use the [Terminal video pipeline](#macos); the GUI's **Start export** button does not start an export.
 
 ### Video Keyframes
 
@@ -70,7 +72,7 @@ PNG, raw binary SCR (`.scr`), C header (`.h`), assembler include (`.inc`)
 ### CLI & Pipe Mode
 
 ```
-img2spec input.png workspace.isw -p output.png
+img2spec_video input.png workspace.isw -p output.png
 ```
 
 | Flag | Description |
@@ -79,34 +81,23 @@ img2spec input.png workspace.isw -p output.png
 | `-h <file>` | Save C header output |
 | `-i <file>` | Save assembler include output |
 | `-s <file>` | Save SCR output |
-| `--pipe --width W --height H` | Process raw RGB24 frames via stdin/stdout |
+| `--pipe --width W --height H` | Read raw RGB24 frames from stdin and write RGBA frames to stdout |
 | `--interpolate` | Enable keyframe interpolation in pipe mode |
 | `--keys <file>` | Load keyframes for per-frame parameter switching |
-| `--batch-stdin` | Read batch jobs as JSON lines from stdin |
 
-**Batch format** (one JSON object per line):
-```json
-{"src":"input.png","workspace":"file.isw","dst":"output.png"}
-```
-
-**Pipe mode** (ffmpeg integration):
-```bash
-ffmpeg -i video.mp4 -f rawvideo -pix_fmt rgb24 - |
-  img2spec workspace.isw --pipe --width 1920 --height 1080 |
-  ffmpeg -f rawvideo -pix_fmt rgba -s 256x384 -i - -c:v libx264 output.mp4
-```
+`-p` writes a PNG image, not a video. `--batch-stdin` and `--headless` are not implemented. `--pipe` processes frames without opening the GUI. See the complete [macOS example](#macos) below.
 
 ### Video Export Pipeline
 
 ```
-ffmpeg (decode) -> img2spec --pipe (process) -> ffmpeg (encode + scale)
+ffmpeg (decode) -> img2spec_video --pipe (process) -> ffmpeg (encode + scale)
 ```
 
 - Frames pass through anonymous pipes (no disk I/O)
-- img2spec processes at device resolution (e.g. 256x384)
+- img2spec_video processes at device resolution (256x192 for the default ZX Spectrum device)
 - Final ffmpeg scales output to `device_resolution x scale_multiplier`
-- Audio re-muxed from source after video encoding completes
-- Requires ffmpeg in PATH or in the program folder
+- Windows GUI export re-muxes audio after video encoding; the macOS example includes audio during encoding
+- Video loading requires both ffmpeg and ffprobe in PATH; on Windows they can also be placed in the program folder
 
 ---
 
@@ -122,6 +113,38 @@ make
 
 Dependencies: SDL2, OpenGL. On Linux: GTK3. On macOS: AppKit. Vendored libdither C sources require C11 or newer (`C_STANDARD 11` is set in CMakeLists; MSVC needs `/std:clatest` or VS2019+ defaults — the legacy v120 toolset cannot build them, use a CMake-generated solution).
 
+### macOS
+
+Install the Xcode Command Line Tools (`xcode-select --install`) if needed. With Homebrew installed, run these commands from the repository root:
+
+```bash
+brew install cmake sdl2 ffmpeg
+cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release
+cmake --build build-macos -j 4
+./build-macos/img2spec_video
+```
+
+Launch from Terminal so the program inherits the PATH containing Homebrew's ffmpeg and ffprobe. OpenGL and AppKit come from the macOS SDK. The `build-macos/` directory is ignored by Git.
+
+To export from Terminal, the following example resizes the input to 256x192 at 25 fps, converts it to the default ZX Spectrum format, and enlarges the result to 512x384. It uses CPU x264 and includes the first source audio stream when present. Run it from the repository root in zsh or bash, replacing `input.mp4` with your video path:
+
+```bash
+set -o pipefail
+input="input.mp4"
+
+ffmpeg -nostdin -i "$input" -map 0:v:0 \
+  -vf "fps=25,scale=256:192" -f rawvideo -pix_fmt rgb24 - |
+./build-macos/img2spec_video --pipe --width 256 --height 192 |
+ffmpeg -nostdin -f rawvideo -pix_fmt rgba \
+  -s 256x192 -framerate 25 -i - -i "$input" \
+  -map 0:v:0 -map '1:a:0?' \
+  -vf "scale=512:384:flags=neighbor" \
+  -c:v libx264 -crf 17 -pix_fmt yuv420p \
+  -c:a aac -shortest output.mp4
+```
+
+For saved modifiers, add `workspace.isw` before `--pipe`. Set `--width` and `--height` to the decoder's output size and the final ffmpeg `-s` to the workspace's device resolution. To reproduce settings made against the original video, remove the decoder's `-vf "fps=25,scale=256:192"`, use the original decoded frame dimensions, and set `-framerate` to the source frame rate (for example, `24000/1001`). This also preserves the frame numbering expected by `--keys "input.mp4.keyframes.json"`; add `--interpolate` to interpolate keyframes. Keep the device resolution constant throughout the export.
+
 ### Visual Studio
 
 Open `img2spectrum.vcxproj`. v120 toolset (VS2013). Win32 and x64 configs. SDL2 expected at `\libraries\sdl2\`.
@@ -131,26 +154,6 @@ Open `img2spectrum.vcxproj`. v120 toolset (VS2013). Win32 and x64 configs. SDL2 
 ```bash
 ./build_w32.sh   # i686, static
 ./build_w64.sh   # x86_64, static
-```
-
----
-
-## Usage
-
-```bash
-# Image conversion
-img2spec cat.png mush.isw -h cat.h
-
-# Video export
-img2spec video.mp4 workspace.isw -p output.mp4
-
-# Pipe mode
-ffmpeg -i input.mp4 -f rawvideo -pix_fmt rgb24 - | \
-  img2spec workspace.isw --pipe --width 1920 --height 1080 | \
-  ffmpeg -f rawvideo -pix_fmt rgba -s 256x384 -i - -c:v libx264 output.mp4
-
-# Batch mode
-echo '{"src":"img.png","workspace":"conv.isw","dst":"out.png"}' | img2spec --batch-stdin
 ```
 
 ---

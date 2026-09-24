@@ -3,6 +3,7 @@ out/
 *.sdf
 *.opensdf
 build/
+build-macos/
 imgui.ini
 build-w*
 .opencode
