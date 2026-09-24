@@ -10,8 +10,6 @@ static int gExportRunning = 0;
 static PROCESS_INFORMATION gExportProc;
 static HANDLE gExportStderrRead = NULL;
 static long gExportLogPos = 0;
-static int gRemuxRunning = 0;
-static PROCESS_INFORMATION gRemuxProc = {0};
 static int gInExportFunc = 0;
 static int gLastExportCheckpoint = 0;
 static HANDLE gExportJob = NULL;
@@ -250,11 +248,17 @@ void start_video_export()
 		sprintf(cmd + strlen(cmd), " --dump-png \"%s\"", dumpPngDir);
 	sprintf(cmd + strlen(cmd), " | "
 		"ffmpeg -loglevel %s -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -framerate %s -i -"
+		" -i \"%s\""
 		" -progress \"%s\""
-		" -vf \"scale=iw*%d:-1:flags=neighbor\" ",
+		" -vf \"scale=iw*%d:-1:flags=neighbor\" "
+		// Single-pass audio: source as 2nd input, video from pipe (0:v),
+		// audio optional (1:a:0?) so no pre-probe is needed; -shortest ends
+		// the output with the shorter stream (same file, ~equal lengths).
+		"-map 0:v:0 -map 1:a:0? -c:a aac -shortest ",
 		loglevelStr,
 		gDevice->mXRes, gDevice->mYRes,
 		fpsStr,
+		gVideoFilename,
 		progressPath,
 		gOptExportScale);
 	gLastExportCheckpoint = 52;
@@ -373,32 +377,7 @@ void start_video_export()
 void poll_video_export()
 {
 #ifdef _WIN32
-	if (!gExportRunning && !gRemuxRunning) return;
-
-	// Poll active audio remux (non-blocking)
-	if (gRemuxRunning)
-	{
-		DWORD remuxExit = 0;
-		if (GetExitCodeProcess(gRemuxProc.hProcess, &remuxExit) && remuxExit == STILL_ACTIVE)
-			return; // still running, check next frame
-
-		// Remux done
-		if (remuxExit != 0)
-			fprintf(stderr, "Export: audio remux failed (exit code %lu), video saved without audio\n", remuxExit);
-		CloseHandle(gRemuxProc.hProcess);
-		CloseHandle(gRemuxProc.hThread);
-		gRemuxProc.hProcess = NULL;
-		gRemuxProc.hThread = NULL;
-		gRemuxRunning = 0;
-
-		if (gOptExportCleanup)
-			export_cleanup_temp_files();
-
-		gVideoExportProgress = 1.0f;
-		gVideoExportActive = false;
-		fprintf(stderr, "Export complete: %s\n", gOptExportFilename);
-		return;
-	}
+	if (!gExportRunning) return;
 
 	DWORD exitCode = 0;
 	if (GetExitCodeProcess(gExportProc.hProcess, &exitCode) && exitCode == STILL_ACTIVE)
@@ -447,7 +426,8 @@ void poll_video_export()
 	}
 	else
 	{
-		// Encoding process done — close handles
+		// Encoding process done — close handles. Audio (if any) was muxed
+		// in the same pass (-map 1:a:0?), so export is complete.
 		fprintf(stderr, "DIAG: poll_video_export() export process exited with code %lu\n", exitCode);
 		gExportRunning = 0;
 		CloseHandle(gExportProc.hProcess);
@@ -456,76 +436,15 @@ void poll_video_export()
 		gExportProc.hThread = NULL;
 		if (gExportJob) { CloseHandle(gExportJob); gExportJob = NULL; }
 
-		// Check if source video has an audio stream
-		char probeCmd[4096];
-		char probeResult[64] = "";
-		_snprintf(probeCmd, sizeof(probeCmd),
-			"ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 \"%s\"",
-			gVideoFilename);
-		FILE *probe = _popen_no_window(probeCmd, "r");
-		if (probe)
-		{
-			if (fgets(probeResult, sizeof(probeResult), probe))
-			{
-				size_t len = strlen(probeResult);
-				if (len > 0 && probeResult[len-1] == '\n') probeResult[len-1] = 0;
-			}
-			// NOTE: fclose, not _pclose (custom pipe, not _popen — see videopipeline.h).
-			// This whole function is _WIN32-only.
-			fclose(probe);
-		}
+		if (exitCode != 0)
+			fprintf(stderr, "Export: encoding failed (exit code %lu)\n", exitCode);
 
-		int hasAudio = (strstr(probeResult, "audio") != NULL);
+		if (gOptExportCleanup)
+			export_cleanup_temp_files();
 
-		if (hasAudio)
-		{
-			char tmpPath[MAX_PATH];
-			_snprintf(tmpPath, sizeof(tmpPath), "%s", gOptExportFilename);
-			char *dot = strrchr(tmpPath, '.');
-			if (dot) *dot = 0;
-			strcat(tmpPath, "_tmp.mp4");
-
-			char exportAbsPath[MAX_PATH];
-			_snprintf(exportAbsPath, MAX_PATH, "%s" PATH_SEP "%s", gStartupCwd, gOptExportFilename);
-			char tmpAbsPath[MAX_PATH];
-			_snprintf(tmpAbsPath, MAX_PATH, "%s" PATH_SEP "%s", gStartupCwd, tmpPath);
-
-			static const char *rlognames[] = {"info", "error", "warning", "verbose", "debug"};
-			int ridx = gOptExportLoglevel;
-			if (ridx < 0 || ridx > 4) ridx = 0;
-			const char *rlog = rlognames[ridx];
-			char remuxCmd[8192];
-			_snprintf(remuxCmd, sizeof(remuxCmd),
-				"cmd.exe /c ffmpeg -loglevel %s -i \"%s\" -i \"%s\" "
-				"-c:v copy -c:a aac -map 0:v:0 -map 1:a:0 -y \"%s\""
-				"&& move /Y \"%s\" \"%s\"",
-				rlog,
-				exportAbsPath, gVideoFilename,
-				tmpAbsPath, tmpAbsPath, exportAbsPath);
-
-			STARTUPINFOA si2 = {0}; si2.cb = sizeof(si2);
-
-			if (CreateProcessA(NULL, remuxCmd, NULL, NULL, FALSE,
-				CREATE_NO_WINDOW, NULL, NULL, &si2, &gRemuxProc))
-			{
-				gRemuxRunning = 1;
-				fprintf(stderr, "DIAG: poll_video_export() audio remux started\n");
-			}
-			else
-			{
-				fprintf(stderr, "Export: audio remux CreateProcess failed (error %d), video saved without audio\n", GetLastError());
-			}
-		}
-
-		if (!gRemuxRunning)
-		{
-			if (gOptExportCleanup)
-				export_cleanup_temp_files();
-
-			gVideoExportProgress = 1.0f;
-			gVideoExportActive = false;
-			fprintf(stderr, "Export complete: %s\n", gOptExportFilename);
-		}
+		gVideoExportProgress = 1.0f;
+		gVideoExportActive = false;
+		fprintf(stderr, "Export complete: %s\n", gOptExportFilename);
 	}
 #endif
 }
@@ -538,15 +457,6 @@ void cancel_video_export()
 	{
 		CloseHandle(gExportJob);
 		gExportJob = NULL;
-	}
-	if (gRemuxRunning)
-	{
-		TerminateProcess(gRemuxProc.hProcess, 1);
-		CloseHandle(gRemuxProc.hProcess);
-		CloseHandle(gRemuxProc.hThread);
-		gRemuxProc.hProcess = NULL;
-		gRemuxProc.hThread = NULL;
-		gRemuxRunning = 0;
 	}
 	if (gExportRunning)
 	{

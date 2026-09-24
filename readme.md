@@ -1,4 +1,4 @@
-# Image Spectrumizer 5.6
+# Image Spectrumizer 5.7
 
 ![Screenshot](img2spec2.jpg)
 
@@ -54,7 +54,7 @@ PNG, raw binary SCR (`.scr`), C header (`.h`), assembler include (`.inc`)
 - All modifiers apply to every frame in real time
 - GUI export on Windows with NVIDIA NVENC (HEVC), AMD AMF (HEVC), or software x264 (H.264)
 - Configurable quality (CRF/QP) and scale multiplier (1x-32x)
-- Audio re-muxed from source after export
+- Audio muxed from source during encoding (single pass, AAC)
 
 GUI export, progress, and cancellation are currently implemented only on Windows. On macOS, use the [Terminal video pipeline](#macos); the GUI's **Start export** button does not start an export.
 
@@ -101,7 +101,10 @@ ffmpeg (decode) -> img2spec_video --pipe (process) -> ffmpeg (encode + scale)
 - Frames pass through anonymous pipes (no disk I/O)
 - img2spec_video processes at device resolution (256x192 for the default ZX Spectrum device)
 - Final ffmpeg scales output to `device_resolution x scale_multiplier`
-- Windows GUI export re-muxes audio after video encoding; the macOS example includes audio during encoding
+- Output framerate = input framerate (probed `avg_frame_rate`, exact num/den via `-framerate`);
+  override with `-r` in Extra ffmpeg params
+- Windows GUI export muxes source audio during encoding (source as 2nd ffmpeg input,
+  optional `-map 1:a:0?`, `-c:a aac`, `-shortest`); no post-pass remux, same as the macOS example
 - Video loading requires both ffmpeg and ffprobe in PATH; on Windows they can also be placed in the program folder
 - Export window checkboxes **Save per-frame device dump to temp/scr** and **Save per-frame .png to temp/png**
   store every processed frame as `temp/scr/frameNNNNNN.<ext>` / `temp/png/frameNNNNNN.png`

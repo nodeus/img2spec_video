@@ -60,7 +60,7 @@ Still, if you find it useful, great!
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize.h"
 
-#define VERSION "5.6"
+#define VERSION "5.7"
 
 #define SERIALIZE(x) json_object_dotset_number(root, #x, x);
 #define DESERIALIZE(x) if (json_object_dotget_value(root, #x) != NULL) x = json_object_dotget_number(root, #x);
@@ -1675,7 +1675,10 @@ int main(int aParamc, char**aParams)
 					"2. Use the timeline slider to scrub through frames\n"
 					"3. Use play/pause and skip buttons for playback\n"
 					"4. All modifiers apply to each video frame in real time\n"
-					"5. Export video (window->export) with configurable encoder and quality\n"
+					"5. Export video (window->export): encoder, quality, scale;\n"
+					"   audio muxed in the same pass, input fps kept;\n"
+					"   optional per-frame dumps to temp/scr + temp/png;\n"
+					"   cleanup removes temp files\n"
 					"\n"
 					"Video keyframes:\n"
 					"----------------\n"
@@ -1694,6 +1697,8 @@ int main(int aParamc, char**aParams)
 					"  --pipe --width W --height H  process raw frames via stdin/stdout\n"
 					"  --interpolate                enable keyframe interpolation in pipe mode\n"
 					"  --keys <file>                load keyframes for per-frame switching\n"
+					"  --dump-scr <dir>             save each frame as raw dump (frameNNNNNN.ext)\n"
+					"  --dump-png <dir>             save each frame as PNG (frameNNNNNN.png)\n"
 					"  --batch-stdin                read batch jobs as JSON lines from stdin\n"
 					"\n"
 					"3x64 mode:\n"
@@ -1823,9 +1828,9 @@ int main(int aParamc, char**aParams)
 				ImGui::Checkbox("Save per-frame device dump to temp/scr", &gOptExportDumpScr);
 				ImGui::Checkbox("Save per-frame .png to temp/png", &gOptExportDumpPng);
 				const char *encoders[] = {"NVENC", "AMF", "x264"};
-				ImGui::Text("Settings: %s | x%d | Q%d",
+				ImGui::Text("Settings: %s | x%d | Q%d | %g fps",
 					encoders[gOptExportEncoder],
-					gOptExportScale, gOptExportQuality);
+					gOptExportScale, gOptExportQuality, gVideoFps);
 
 				if (gVideoExportActive)
 				{

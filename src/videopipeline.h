@@ -108,9 +108,29 @@ void get_video_frame(int frameNum)
 	update_texture(gTextureOrig, gBitmapOrig);
 }
 
+// Parse an ffprobe frame-rate string ("num/den" or plain number) into num/den.
+// Returns false for bogus values (0/0, negatives) so callers can fall back.
+static bool parse_fps_str(const char *s, int *num, int *den)
+{
+	if (!s || !s[0] || !num || !den) return false;
+	if (strchr(s, '/'))
+	{
+		int n = 0, d = 1;
+		if (sscanf(s, "%d/%d", &n, &d) != 2 || d <= 0 || n <= 0) return false;
+		*num = n; *den = d;
+		return true;
+	}
+	double f = atof(s);
+	if (f <= 0) return false;
+	*num = (int)(f * 1000 + 0.5); *den = 1000;
+	return true;
+}
+
 // Parse combined ffprobe output (2.4):
-//   line 1: "width,height,r_frame_rate" (e.g. "640,480,25/1")
+//   line 1: "width,height,avg_frame_rate,r_frame_rate" (e.g. "640,480,25/1,25/1")
 //   line 2: "duration" (e.g. "60.000000")
+// Preferred fps is avg_frame_rate (playback speed); r_frame_rate is the
+// fallback (it can be 0/0 or a bogus timescale value on some files).
 static bool parse_ffprobe_combined(const char *out, int *w, int *h, int *num, int *den, double *dur)
 {
 	if (!out || !w || !h || !num || !den || !dur) return false;
@@ -122,23 +142,15 @@ static bool parse_ffprobe_combined(const char *out, int *w, int *h, int *num, in
 	memcpy(line1, out, n);
 	line1[n] = 0;
 
-	char fps[64] = "";
+	char fpsAvg[64] = "", fpsR[64] = "";
 	int tw = 0, th = 0;
-	if (sscanf(line1, "%d,%d,%63s", &tw, &th, fps) != 3) return false;
+	// NOTE: %[^,] (not %s) so "0/0,30/1" splits into two fields.
+	if (sscanf(line1, "%d,%d,%63[^,],%63s", &tw, &th, fpsAvg, fpsR) < 3) return false;
 	if (tw <= 0 || th <= 0) return false;
 
 	int tnum = 0, tden = 1;
-	if (strchr(fps, '/'))
-	{
-		if (sscanf(fps, "%d/%d", &tnum, &tden) != 2 || tden <= 0) return false;
-	}
-	else
-	{
-		double f = atof(fps);
-		if (f <= 0) return false;
-		tnum = (int)(f * 1000 + 0.5);
-		tden = 1000;
-	}
+	if (!parse_fps_str(fpsAvg, &tnum, &tden) && !parse_fps_str(fpsR, &tnum, &tden))
+		return false;
 
 	if (!nl) return false;
 	double tdur = atof(nl + 1);
@@ -165,8 +177,9 @@ void load_video(const char *filename)
 	double dur = 0;
 	bool probed = false;
 
-	// Single combined ffprobe call: resolution + fps + duration (2.4)
-	sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate -show_entries format=duration -of csv=p=0 \"%s\"", filename);
+	// Single combined ffprobe call: resolution + fps + duration (2.4).
+	// avg_frame_rate first (playback speed), r_frame_rate as fallback.
+	sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate,r_frame_rate -show_entries format=duration -of csv=p=0 \"%s\"", filename);
 	res = run_pipe(cmd);
 	if (res)
 		probed = parse_ffprobe_combined(res, &vw, &vh, &num, &den, &dur);
@@ -186,23 +199,17 @@ void load_video(const char *filename)
 		if (!res) return;
 		dur = atof(res);
 
-		// ffprobe: frame rate
-		sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 \"%s\"", filename);
+		// ffprobe: frame rate (avg first, r fallback, then 25 fps default)
+		sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate -of csv=p=0 \"%s\"", filename);
 		res = run_pipe(cmd);
-		if (!res) return;
-		// r_frame_rate is "num/den" or "num"
-		if (strchr(res, '/'))
+		bool fpsOk = res && parse_fps_str(res, &num, &den);
+		if (!fpsOk)
 		{
-			num = 0; den = 1;
-			sscanf(res, "%d/%d", &num, &den);
-			if (den <= 0) { num = 25000; den = 1000; }
+			sprintf(cmd, "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 \"%s\"", filename);
+			res = run_pipe(cmd);
+			fpsOk = res && parse_fps_str(res, &num, &den);
 		}
-		else
-		{
-			double f = atof(res);
-			num = (int)(f * 1000 + 0.5);
-			den = 1000;
-		}
+		if (!fpsOk) { num = 25000; den = 1000; }
 	}
 
 	gVideoWidth = vw;

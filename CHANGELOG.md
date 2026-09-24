@@ -1,5 +1,30 @@
 # Changelog
 
+## 5.7 — Per-Frame Dumps, Single-Pass Audio & fps Fix
+
+### New Features
+
+- **Per-frame dumps on video export** — Export window checkboxes save every processed frame as `temp/scr/frameNNNNNN.<ext>` (raw device dump) and `temp/png/frameNNNNNN.png` (device resolution, numbering matches `--keys` frames); new `--dump-scr <dir>` / `--dump-png <dir>` pipe flags also work standalone (e.g. macOS Terminal pipeline)
+- **Per-device dump extensions** — new virtual `Device::dumpext()`: ZX Spectrum / ZXHalfTile → `.scr`, ZX3x64 → `.3sc` (1 pixel set + 2 attribute sets, non-standard), C64Hires → `.h64`, C64Multicolor → `.m64` (raw dumps carry no load address, so not `.prg`)
+- **Cleanup temporary files now removes everything** — the 5 service files plus all of `temp/scr` and `temp/png` (directories themselves removed); factored into `export_cleanup_temp_files()`
+
+### Improvements
+
+- **Single-pass audio** — the source video is fed to the encoding ffmpeg as 2nd input (`-map 0:v:0 -map 1:a:0? -c:a aac -shortest`); the post-pass remux (`_tmp.mp4` + `move`, ffprobe audio probe, second ffmpeg run, ~100 lines) is deleted
+- **Output framerate = input framerate** — probe prefers `avg_frame_rate` (fallback `r_frame_rate`, then 25 fps), exact num/den passed via `-framerate`; override with `-r` in Extra ffmpeg params; input fps shown in the Export window Settings line
+
+### Bug Fixes
+
+- **CIEDE2000 used radians as degrees** (upstream `robertkist/libdither#10`) — `hp_ave` went raw into `T` / `delta_theta` (constant-ish `T`, dead rotation term): 23/33 Sharma reference pairs failed (max err 6.63), hue sweep off by up to 29%; fixed with `RAD2DEG`, now 33/33 pass (local patch noted in `VENDOR.txt`)
+- **CCIR distance assumed 0..255 inputs** — `FloatColor` channels are 0..1, so the luminance term was suppressed ~255x and palette-choice ordering differed from the author's intent; `/255` normalization removed (verified: new 0..1 ordering matches the original byte-scale ordering on ~1.9M grid comparisons)
+- Combined ffprobe parser split `avg,r` fields with `%s`, gluing e.g. `0/0,30/1` into one field; now `%[^,]`
+
+### Internal
+
+- Merged PR #1 from `ruguevara/fix/macos-build` (macOS build shims in `nonwin32.h`, `--whole-archive` only for WIN32, portable `PATH_SEP`, macOS docs)
+
+---
+
 ## 5.6 — libdither Dithering Engine
 
 ### New Features
