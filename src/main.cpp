@@ -60,7 +60,7 @@ Still, if you find it useful, great!
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize.h"
 
-#define VERSION "5.8"
+#define VERSION "5.9"
 
 #define SERIALIZE(x) json_object_dotset_number(root, #x, x);
 #define DESERIALIZE(x) if (json_object_dotget_value(root, #x) != NULL) x = json_object_dotget_number(root, #x);
@@ -1970,8 +1970,39 @@ int main(int aParamc, char**aParams)
 
 				if (gVideoExportActive)
 				{
-					int pct = (int)(gVideoExportProgress * 100);
-					ImGui::Text("Progress: %d%%", pct);
+					float p = gVideoExportProgress;
+					if (p < 0.0f) p = 0.0f;
+					if (p > 1.0f) p = 1.0f;
+					int pct = (int)(p * 100.0f);
+					// Custom progress bar (vendored ImGui has no ProgressBar):
+					// Dummy reserves the rect, DrawList fills it.
+					float barW = ImGui::GetContentRegionAvail().x;
+					if (barW < 50.0f) barW = 50.0f;
+					ImGui::Dummy(ImVec2(barW, 18.0f));
+					ImVec2 bMin = ImGui::GetItemRectMin();
+					ImVec2 bMax = ImGui::GetItemRectMax();
+					ImDrawList *bDraw = ImGui::GetWindowDrawList();
+					bDraw->AddRectFilled(bMin, bMax, 0xFF3A3A3A);
+					if (p > 0.0f)
+						bDraw->AddRectFilled(bMin, ImVec2(bMin.x + (bMax.x - bMin.x) * p, bMax.y), 0xFF3CA65C);
+					bDraw->AddRect(bMin, bMax, 0xFF808080);
+					// Elapsed + ETA from export start ticks
+					Uint32 elapsedMs = 0;
+					if (gExportStartTicks != 0)
+					{
+						Uint32 now = SDL_GetTicks();
+						elapsedMs = (now >= gExportStartTicks) ? (now - gExportStartTicks) : 0;
+					}
+					int elS = (int)(elapsedMs / 1000);
+					if (p > 0.005f)
+					{
+						int etaS = (int)((double)elapsedMs / (double)p / 1000.0 + 0.5) - elS;
+						if (etaS < 0) etaS = 0;
+						ImGui::Text("Progress: %d%% — elapsed %02d:%02d, ETA %02d:%02d",
+							pct, elS / 60, elS % 60, etaS / 60, etaS % 60);
+					}
+					else
+						ImGui::Text("Progress: %d%% — elapsed %02d:%02d", pct, elS / 60, elS % 60);
 					if (ImGui::Button("Cancel"))
 						cancel_video_export();
 				}

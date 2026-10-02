@@ -1,4 +1,4 @@
-# Image Spectrumizer 5.8 — Описание
+# Image Spectrumizer 5.9 — Описание
 
 GUI-утилита для конвертации изображений в формат ZX Spectrum и других ретро-платформ, с **обработкой видео**, **интерполяцией ключевых кадров**, **CLI-режимом пайпов** и **дизерингом на libdither** (19 ядер error diffusion, 43 ordered-матрицы, 10 режимов цветовой дистанции, моно-дизеринг).
 
@@ -103,13 +103,17 @@ ffmpeg (декодирование) -> img2spec_video --pipe (обработка
   опциональный `-map 1:a:0?`, `-c:a aac`, `-shortest`); отдельного прохода ремукса нет, как в примере для macOS
 - Частичный экспорт: декодер стартует с `-ss` + `-frames:v`, аудио-вход обрезается `-ss`/`-t`,
   `-progress` измеряется относительно длительности диапазона (не всего видео)
+- Прогресс — это `max(кадры декодера, out_time кодера)`: декодер пишет свой `-progress`-файл,
+  поэтому бар движется и при экспорте в GIF (где `palettegen` буферизует все кадры и кодер
+  молчит до самого конца); окно экспорта показывает бар с прошедшим временем и ETA
 - Имя файла экспорта по умолчанию: `<input>_spmz.<mp4|mkv|gif>` (расширение следует за форматом)
 - Для загрузки видео нужны ffmpeg и ffprobe в PATH; на Windows их также можно разместить в папке программы
 - Чекбоксы окна экспорта **Save per-frame device dump to temp/scr** и **Save per-frame .png to temp/png**
   сохраняют каждый обработанный кадр как `temp/scr/frameNNNNNN.<расш>` / `temp/png/frameNNNNNN.png`
   (нумерация совпадает с кадрами `--keys`)
-- **Cleanup temporary files** удаляет 5 служебных файлов (`img2spec_export.isw`,
-  `img2spec_export_keys.json`, `img2spec_export_progress.txt`, `img2spec_export.bat`,
+- **Cleanup temporary files** удаляет 6 служебных файлов (`img2spec_export.isw`,
+  `img2spec_export_keys.json`, `img2spec_export_progress.txt`, `img2spec_export_decode_progress.txt`,
+  `img2spec_export.bat`,
   `img2spec_export_stderr.log`) **плюс** всё содержимое `temp/scr` и `temp/png`
   (сами каталоги тоже удаляются); при выключенном Cleanup всё остаётся в `temp/`
 

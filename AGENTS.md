@@ -6,7 +6,7 @@ C++14 GUI tool (SDL2 + ImGui) for converting images to ZX Spectrum / retro-platf
 
 ## Version
 
-Current: **5.8** (defined as `#define VERSION "5.8"` in `src/main.cpp:63`).
+Current: **5.9** (defined as `#define VERSION "5.9"` in `src/main.cpp:63`).
 
 ## Build
 
