@@ -1338,7 +1338,7 @@ int main(int aParamc, char**aParams)
 		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
 		SDL_DisplayMode current;
 		SDL_GetCurrentDisplayMode(0, &current);
-		window = SDL_CreateWindow("Image Spectrumizer " VERSION " - http://iki.fi/sol", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,     1600, 800,
+		window = SDL_CreateWindow("Image Spectrumizer " VERSION " - https://github.com/nodeus/img2spec_video", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,     1600, 800,
     SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
 		glcontext = SDL_GL_CreateContext(window);
 		SDL_VERSION(&wminfo.version);
