@@ -222,6 +222,9 @@ void load_video(const char *filename)
 
 	gVideoTotalFrames = (int)(gVideoDuration * gVideoFps + 0.5);
 	gVideoCurrentFrame = 0;
+	gVideoExportIn = 0;
+	gVideoExportOut = (gVideoTotalFrames > 1) ? (gVideoTotalFrames - 1) : 0;
+	gTimelineDragSide = 0;
 	gVideoMode = true;
 	strcpy(gVideoFilename, filename);
 

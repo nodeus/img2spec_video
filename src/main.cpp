@@ -60,7 +60,7 @@ Still, if you find it useful, great!
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize.h"
 
-#define VERSION "5.7"
+#define VERSION "5.8"
 
 #define SERIALIZE(x) json_object_dotset_number(root, #x, x);
 #define DESERIALIZE(x) if (json_object_dotget_value(root, #x) != NULL) x = json_object_dotget_number(root, #x);
@@ -123,12 +123,58 @@ float gVideoExportProgress = 0.0f;
 int gOptExportScale = 8;
 int gOptExportEncoder = 0;
 int gOptExportQuality = 17;
+int gOptExportFormat = 0;  // 0=mp4, 1=mkv, 2=gif
 char gOptExportFilename[1024] = "";
 char gOptExportExtraParams[1024] = "";
 int gOptExportLoglevel = 0;  // 0=info, 1=error, 2=warning, 3=verbose, 4=debug
 bool gOptExportCleanup = true;
 bool gOptExportDumpScr = false;  // save per-frame raw dump to temp/scr
 bool gOptExportDumpPng = false;  // save per-frame .png to temp/png
+int gVideoExportIn = 0;   // first frame to export (inclusive)
+int gVideoExportOut = 0;  // last frame to export (inclusive)
+int gTimelineDragSide = 0;  // RMB-dragged export marker on timeline: 1=In, 2=Out
+
+static const char *export_format_ext()
+{
+	switch (gOptExportFormat)
+	{
+		case 1: return "mkv";
+		case 2: return "gif";
+		default: return "mp4";
+	}
+}
+
+// Build default output filename from the loaded video basename:
+// "<base>_spmz.<ext>" where ext follows gOptExportFormat. Basename only (CWD).
+static void export_set_default_filename()
+{
+	const char *base = strrchr(gVideoFilename, '\\');
+	if (!base) base = strrchr(gVideoFilename, '/');
+	if (base) base++; else base = gVideoFilename;
+	_snprintf(gOptExportFilename, sizeof(gOptExportFilename) - 12, "%s", base);
+	char *dot = strrchr(gOptExportFilename, '.');
+	if (dot) *dot = 0;
+	strcat(gOptExportFilename, "_spmz.");
+	strcat(gOptExportFilename, export_format_ext());
+}
+
+// Keep export range valid against the loaded video length.
+static void export_clamp_range()
+{
+	if (gVideoTotalFrames > 1)
+	{
+		if (gVideoExportIn < 0) gVideoExportIn = 0;
+		if (gVideoExportOut < 0) gVideoExportOut = 0;
+		if (gVideoExportIn >= gVideoTotalFrames) gVideoExportIn = gVideoTotalFrames - 1;
+		if (gVideoExportOut >= gVideoTotalFrames) gVideoExportOut = gVideoTotalFrames - 1;
+		if (gVideoExportIn > gVideoExportOut) gVideoExportIn = gVideoExportOut;
+	}
+	else
+	{
+		gVideoExportIn = 0;
+		gVideoExportOut = 0;
+	}
+}
 
 int gVideoPendingFrame = -1;  // frame to load after ImGui::Render()
 bool gKeyframesSidecarDirty = false;     // sidecar needs a disk write (debounced, 2.3)
@@ -1480,6 +1526,13 @@ int main(int aParamc, char**aParams)
 				if (ImGui::MenuItem("Export .scr (binary)")) { savescr(); }
 				if (ImGui::MenuItem("Export .h")) { saveh(); }
 				if (ImGui::MenuItem("Export .inc")) { saveinc(); }
+				ImGui::Separator();
+				if (ImGui::MenuItem("Export video...", 0, false, gVideoMode))
+				{
+					export_set_default_filename();
+					export_clamp_range();
+					gWindowExport = true;
+				}
 				ImGui::EndMenu();
 			}
 			if (ImGui::BeginMenu("Window"))
@@ -1817,20 +1870,103 @@ int main(int aParamc, char**aParams)
 			{
 				ImGuiInputTextFlags flags = gVideoExportActive ? ImGuiInputTextFlags_ReadOnly : 0;
 				ImGui::InputText("Output file", gOptExportFilename, 1024, flags);
-				ImGui::Combo("Encoder", &gOptExportEncoder,
-					"NVIDIA NVENC\0AMD AMF\0CPU x264\0");
-				ImGui::SliderInt("Quality (CRF/QP)", &gOptExportQuality, 0, 51);
+				int maxFrame = (gVideoTotalFrames > 1) ? (gVideoTotalFrames - 1) : 0;
+				if (!gVideoExportActive && ImGui::Combo("Format", &gOptExportFormat,
+					"mp4\0mkv\0gif\0"))
+				{
+					// Keep the filename extension in sync with the format
+					char *dot = strrchr(gOptExportFilename, '.');
+					if (dot) *dot = 0;
+					strcat(gOptExportFilename, ".");
+					strcat(gOptExportFilename, export_format_ext());
+				}
+				bool isGif = (gOptExportFormat == 2);
+				if (!isGif)
+				{
+					ImGui::Combo("Encoder", &gOptExportEncoder,
+						"NVIDIA NVENC\0AMD AMF\0CPU x264\0");
+					ImGui::SliderInt("Quality (CRF/QP)", &gOptExportQuality, 0, 51);
+				}
 				ImGui::SliderInt("Scale", &gOptExportScale, 1, 32);
 				ImGui::InputText("Extra ffmpeg params", gOptExportExtraParams, 1024);
 				ImGui::Combo("ffmpeg loglevel", &gOptExportLoglevel,
 					"info\0error\0warning\0verbose\0debug\0");
+				ImGui::Separator();
+				ImGui::Text("Export range:");
+				if (!gVideoExportActive)
+				{
+					export_clamp_range();
+					if (ImGui::SliderInt("In", &gVideoExportIn, 0, maxFrame, "Frame %.0f"))
+					{
+						if (gVideoExportIn > gVideoExportOut) gVideoExportOut = gVideoExportIn;
+					}
+					ImGui::SameLine();
+					ImGui::PushItemWidth(90);
+					if (ImGui::InputInt("##in_frame", &gVideoExportIn, 1, 10))
+					{
+						if (gVideoExportIn < 0) gVideoExportIn = 0;
+						if (gVideoExportIn > maxFrame) gVideoExportIn = maxFrame;
+						if (gVideoExportIn > gVideoExportOut) gVideoExportOut = gVideoExportIn;
+						gVideoCurrentFrame = gVideoExportIn;
+						gVideoPendingFrame = gVideoExportIn;
+					}
+					ImGui::PopItemWidth();
+					if (ImGui::SliderInt("Out", &gVideoExportOut, 0, maxFrame, "Frame %.0f"))
+					{
+						if (gVideoExportOut < gVideoExportIn) gVideoExportIn = gVideoExportOut;
+					}
+					ImGui::SameLine();
+					ImGui::PushItemWidth(90);
+					if (ImGui::InputInt("##out_frame", &gVideoExportOut, 1, 10))
+					{
+						if (gVideoExportOut < 0) gVideoExportOut = 0;
+						if (gVideoExportOut > maxFrame) gVideoExportOut = maxFrame;
+						if (gVideoExportOut < gVideoExportIn) gVideoExportIn = gVideoExportOut;
+						gVideoCurrentFrame = gVideoExportOut;
+						gVideoPendingFrame = gVideoExportOut;
+					}
+					ImGui::PopItemWidth();
+					if (ImGui::Button("Set In to current"))
+					{
+						gVideoExportIn = gVideoCurrentFrame;
+						if (gVideoExportIn > gVideoExportOut) gVideoExportOut = gVideoExportIn;
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Set Out to current"))
+					{
+						gVideoExportOut = gVideoCurrentFrame;
+						if (gVideoExportOut < gVideoExportIn) gVideoExportIn = gVideoExportOut;
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Full range"))
+					{
+						gVideoExportIn = 0;
+						gVideoExportOut = maxFrame;
+					}
+				}
+				{
+					double inSec = (gVideoFps > 0.0) ? (double)gVideoExportIn / gVideoFps : 0.0;
+					double outSec = (gVideoFps > 0.0) ? (double)gVideoExportOut / gVideoFps : 0.0;
+					ImGui::Text("Range: %02d:%02d (f%d) .. %02d:%02d (f%d), %.1f sec",
+						(int)inSec / 60, (int)inSec % 60, gVideoExportIn,
+						(int)outSec / 60, (int)outSec % 60, gVideoExportOut,
+						outSec - inSec);
+				}
+				ImGui::Separator();
 				ImGui::Checkbox("Cleanup temporary files", &gOptExportCleanup);
 				ImGui::Checkbox("Save per-frame device dump to temp/scr", &gOptExportDumpScr);
 				ImGui::Checkbox("Save per-frame .png to temp/png", &gOptExportDumpPng);
 				const char *encoders[] = {"NVENC", "AMF", "x264"};
-				ImGui::Text("Settings: %s | x%d | Q%d | %g fps",
-					encoders[gOptExportEncoder],
-					gOptExportScale, gOptExportQuality, gVideoFps);
+				const char *formats[] = {"mp4", "mkv", "gif"};
+				if (isGif)
+					ImGui::Text("Settings: %s | x%d | %g fps",
+						formats[gOptExportFormat],
+						gOptExportScale, gVideoFps);
+				else
+					ImGui::Text("Settings: %s | %s | x%d | Q%d | %g fps",
+						formats[gOptExportFormat],
+						encoders[gOptExportEncoder],
+						gOptExportScale, gOptExportQuality, gVideoFps);
 
 				if (gVideoExportActive)
 				{
@@ -1928,35 +2064,68 @@ int main(int aParamc, char**aParams)
 		{
 			ImGui::Separator();
 
+			// Double-height timeline: grow FramePadding so the slider is 2x tall
+			// (frame height = text height + vertical padding on both sides)
+			float tlFrameH = ImGui::GetTextLineHeight() + ImGui::GetStyle().FramePadding.y * 2.0f;
+			float tlPadY = ImGui::GetStyle().FramePadding.y + tlFrameH * 0.5f;
+			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, tlPadY));
 			if (ImGui::SliderInt("##timeline", &gVideoCurrentFrame, 0,
 				(gVideoTotalFrames > 1) ? (gVideoTotalFrames - 1) : 1,
 				"Frame %.0f"))
 			{
 				gVideoPendingFrame = gVideoCurrentFrame;
 			}
+			ImGui::PopStyleVar();
 
-			// Draw keyframe markers on the timeline slider
-			if (gKeyframesLoaded && gKeyframeCount > 0)
+		// Shade timeline parts outside the export range + keyframe markers.
+		// The slider rect is saved for the draggable In/Out handles below.
+		ImVec2 tlMin, tlMax;
+		{
+			export_clamp_range();
+			ImDrawList *drawList = ImGui::GetWindowDrawList();
+			tlMin = ImGui::GetItemRectMin();
+			tlMax = ImGui::GetItemRectMax();
+			ImVec2 sliderMin = tlMin;
+			ImVec2 sliderMax = tlMax;
+			float sliderWidth = sliderMax.x - sliderMin.x;
+			float midY = (sliderMin.y + sliderMax.y) * 0.5f;
+
+			if (gVideoTotalFrames > 1)
 			{
-				ImDrawList *drawList = ImGui::GetWindowDrawList();
-				ImVec2 sliderMin = ImGui::GetItemRectMin();
-				ImVec2 sliderMax = ImGui::GetItemRectMax();
-				float sliderWidth = sliderMax.x - sliderMin.x;
+				float tIn = (float)gVideoExportIn / (float)(gVideoTotalFrames - 1);
+				float tOut = (float)gVideoExportOut / (float)(gVideoTotalFrames - 1);
+				float xIn = sliderMin.x + tIn * sliderWidth;
+				float xOut = sliderMin.x + tOut * sliderWidth;
+				// Dimmed regions that will NOT be exported
+				if (xIn > sliderMin.x)
+					drawList->AddRectFilled(ImVec2(sliderMin.x, sliderMin.y), ImVec2(xIn, sliderMax.y), 0x99000000, 0.0f);
+				if (xOut < sliderMax.x)
+					drawList->AddRectFilled(ImVec2(xOut, sliderMin.y), ImVec2(sliderMax.x, sliderMax.y), 0x99000000, 0.0f);
+				// Range edge guide lines through the full bar height
+				drawList->AddLine(ImVec2(xIn, sliderMin.y), ImVec2(xIn, sliderMax.y), 0xFF3CD43C, 2.0f);
+				drawList->AddLine(ImVec2(xOut, sliderMin.y), ImVec2(xOut, sliderMax.y), 0xFF3C78DC, 2.0f);
+				// In marker (green triangle up), Out marker (blue triangle down)
+				drawList->AddTriangleFilled(ImVec2(xIn - 8, sliderMax.y + 2), ImVec2(xIn + 8, sliderMax.y + 2), ImVec2(xIn, sliderMax.y - 9), 0xFF3CD43C);
+				drawList->AddTriangleFilled(ImVec2(xOut - 8, sliderMin.y - 2), ImVec2(xOut + 8, sliderMin.y - 2), ImVec2(xOut, sliderMin.y + 9), 0xFF3C78DC);
+			}
 
-				for (int i = 0; i < gKeyframeCount; i++)
+				if (gKeyframesLoaded && gKeyframeCount > 0)
 				{
-					float t = (gVideoTotalFrames > 1)
-						? (float)gKeyframes[i].frame / (float)(gVideoTotalFrames - 1)
-						: 0.0f;
-					float x = sliderMin.x + t * sliderWidth;
-					// Red diamond marker
-					ImVec2 center(x, (sliderMin.y + sliderMax.y) * 0.5f);
-				ImVec2 p1(center.x, center.y - 5);
-				ImVec2 p2(center.x + 4, center.y);
-				ImVec2 p3(center.x, center.y + 5);
-				ImVec2 p4(center.x - 4, center.y);
-				ImVec2 pts[4] = { p1, p2, p3, p4 };
-				drawList->AddConvexPolyFilled(pts, 4, 0xDC3C3CFF, true);
+					for (int i = 0; i < gKeyframeCount; i++)
+					{
+						float t = (gVideoTotalFrames > 1)
+							? (float)gKeyframes[i].frame / (float)(gVideoTotalFrames - 1)
+							: 0.0f;
+						float x = sliderMin.x + t * sliderWidth;
+						// Red diamond marker
+						ImVec2 center(x, midY);
+					ImVec2 p1(center.x, center.y - 5);
+					ImVec2 p2(center.x + 4, center.y);
+					ImVec2 p3(center.x, center.y + 5);
+					ImVec2 p4(center.x - 4, center.y);
+					ImVec2 pts[4] = { p1, p2, p3, p4 };
+					drawList->AddConvexPolyFilled(pts, 4, 0xDC3C3CFF, true);
+					}
 				}
 			}
 
@@ -1988,6 +2157,95 @@ int main(int aParamc, char**aParams)
 				sec / 60, sec % 60,
 				totalSec / 60, totalSec % 60,
 				gVideoFps);
+
+			// Export range markers are dragged with RMB (right mouse button):
+			// grab the marker's triangle/column and move it, LMB keeps scrubbing
+			// the current frame everywhere. No widgets are submitted here
+			// (InvisibleButton would steal LMB from the slider), only manual
+			// hit-testing against the saved timeline rect.
+			if (gVideoTotalFrames > 1)
+			{
+				float sliderWidth = tlMax.x - tlMin.x;
+				float xIn = tlMin.x + (float)gVideoExportIn / (float)(gVideoTotalFrames - 1) * sliderWidth;
+				float xOut = tlMin.x + (float)gVideoExportOut / (float)(gVideoTotalFrames - 1) * sliderWidth;
+				float grabR = 9.0f;
+				ImVec2 mpos = ImGui::GetMousePos();
+				// Hit zone covers the full bar height plus the triangles
+				// (In triangle below, Out triangle above the bar).
+				bool inRow = (mpos.y >= tlMin.y - 12.0f && mpos.y <= tlMax.y + 12.0f);
+				float din = mpos.x - xIn; if (din < 0) din = -din;
+				float dout = mpos.x - xOut; if (dout < 0) dout = -dout;
+				int hovSide = 0;  // 1=In, 2=Out hovered this frame
+				if (inRow && ImGui::IsWindowHovered())
+				{
+					bool inHit = (din <= grabR);
+					bool outHit = (dout <= grabR);
+					if (inHit && outHit)
+						// Markers coincide: pick by half relative to center
+						hovSide = (mpos.x < (xIn + xOut) * 0.5f) ? 1 : 2;
+					else if (inHit)
+						hovSide = 1;
+					else if (outHit)
+						hovSide = 2;
+				}
+				if (hovSide != 0 && gTimelineDragSide == 0)
+				{
+					ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+					if (hovSide == 1)
+					{
+						int inS = (int)((double)gVideoExportIn / gVideoFps);
+						ImGui::SetTooltip("In: f%d %02d:%02d (RMB-drag)", gVideoExportIn, inS / 60, inS % 60);
+					}
+					else
+					{
+						int outS = (int)((double)gVideoExportOut / gVideoFps);
+						ImGui::SetTooltip("Out: f%d %02d:%02d (RMB-drag)", gVideoExportOut, outS / 60, outS % 60);
+					}
+				}
+				if (gTimelineDragSide == 0)
+				{
+					if (hovSide != 0 && ImGui::IsMouseClicked(1))
+						gTimelineDragSide = hovSide;
+				}
+				else
+				{
+					if (ImGui::IsMouseDown(1))
+					{
+						int f = (int)((mpos.x - tlMin.x) / sliderWidth * (float)(gVideoTotalFrames - 1) + 0.5f);
+						if (f < 0) f = 0;
+						if (f >= gVideoTotalFrames) f = gVideoTotalFrames - 1;
+						if (gTimelineDragSide == 1)
+						{
+							gVideoExportIn = f;
+							if (gVideoExportIn > gVideoExportOut) gVideoExportIn = gVideoExportOut;
+							gVideoCurrentFrame = gVideoExportIn;
+						}
+						else
+						{
+							gVideoExportOut = f;
+							if (gVideoExportOut < gVideoExportIn) gVideoExportOut = gVideoExportIn;
+							gVideoCurrentFrame = gVideoExportOut;
+						}
+						// Preview follows the dragged marker (loaded after Render())
+						gVideoPendingFrame = gVideoCurrentFrame;
+						ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+						if (gTimelineDragSide == 1)
+						{
+							int inS = (int)((double)gVideoExportIn / gVideoFps);
+							ImGui::SetTooltip("In: f%d %02d:%02d", gVideoExportIn, inS / 60, inS % 60);
+						}
+						else
+						{
+							int outS = (int)((double)gVideoExportOut / gVideoFps);
+							ImGui::SetTooltip("Out: f%d %02d:%02d", gVideoExportOut, outS / 60, outS % 60);
+						}
+					}
+					else
+						gTimelineDragSide = 0;
+				}
+			}
+			else
+				gTimelineDragSide = 0;
 
 			// Keyframe controls
 			if (gKeyframesLoaded)
@@ -2146,19 +2404,6 @@ int main(int aParamc, char**aParams)
 				}
 			}
 
-		ImGui::Separator();
-		if (ImGui::Button("Export video..."))
-		{
-			// Set default output filename (basename only, save in CWD)
-			const char *base = strrchr(gVideoFilename, '\\');
-			if (!base) base = strrchr(gVideoFilename, '/');
-			if (base) base++; else base = gVideoFilename;
-			strcpy(gOptExportFilename, base);
-			char *dot = strrchr(gOptExportFilename, '.');
-			if (dot) *dot = 0;
-			strcat(gOptExportFilename, "_spmz.mp4");
-			gWindowExport = true;
-		}
 		}
 
 		if (!gOptImagesDocked)
@@ -2247,7 +2492,10 @@ int main(int aParamc, char**aParams)
             {
                 gVideoPlayLastTick = now;
                 int next = gVideoCurrentFrame + 1;
-                if (next < gVideoTotalFrames)
+                int playEnd = (gVideoTotalFrames > 1) ? gVideoTotalFrames - 1 : 0;
+                if (gVideoExportOut >= 0 && gVideoExportOut < gVideoTotalFrames)
+                    playEnd = gVideoExportOut;
+                if (next <= playEnd)
                     get_video_frame(next);
                 else
                     gVideoPlaying = false;

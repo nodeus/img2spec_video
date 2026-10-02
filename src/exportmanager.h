@@ -4,6 +4,7 @@
 #pragma once
 
 static int gExportRunning = 0;
+static double gExportRangeSecs = 0.0;  // progress denominator (range duration)
 
 #ifdef _WIN32
 #include <windows.h>
@@ -99,14 +100,32 @@ void start_video_export()
 
 	if (gOptExportFilename[0] == 0)
 	{
-		const char *base = strrchr(gVideoFilename, '\\');
-		if (!base) base = strrchr(gVideoFilename, '/');
-		if (base) base++; else base = gVideoFilename;
-		_snprintf(gOptExportFilename, sizeof(gOptExportFilename) - 12, "%s", base);
-		char *dot = strrchr(gOptExportFilename, '.');
-		if (dot) *dot = 0;
-		strcat(gOptExportFilename, "_spmz.mp4");
+		export_set_default_filename();
 	}
+	export_clamp_range();
+
+	int rangeIn = gVideoExportIn;
+	int rangeOut = gVideoExportOut;
+	if (gVideoTotalFrames > 1)
+	{
+		if (rangeIn < 0) rangeIn = 0;
+		if (rangeOut >= gVideoTotalFrames) rangeOut = gVideoTotalFrames - 1;
+		if (rangeIn > rangeOut) rangeIn = rangeOut;
+	}
+	else
+	{
+		rangeIn = 0; rangeOut = 0;
+	}
+	int rangeFrames = rangeOut - rangeIn + 1;
+	if (rangeFrames < 1) rangeFrames = 1;
+	double rangeSecs = (gVideoFps > 0.0) ? (double)rangeFrames / gVideoFps : 0.0;
+	gExportRangeSecs = rangeSecs;
+	double inSec = (gVideoFps > 0.0) ? (double)rangeIn / gVideoFps : 0.0;
+	bool isGif = (gOptExportFormat == 2);
+#ifndef _WIN32
+	// GUI export runs on Windows only; silence unused warnings elsewhere.
+	(void)rangeFrames; (void)inSec; (void)isGif;
+#endif
 
 #ifdef _WIN32
 	// Ensure temp/ subdirectory exists in startup CWD
@@ -224,18 +243,19 @@ void start_video_export()
 		_snprintf(_dlog, MAX_PATH, "%s" PATH_SEP "img2spec_crash.log", gStartupCwd);
 		FILE *_df = fopen(_dlog, "a");
 		if (_df) {
-			fprintf(_df, "DIAG args: loglevel=%p video=%p exe=%p ws=%p keys=%p fps=%p progress=%p gDevice=%p gVideoWidth=%d gVideoHeight=%d gOptExportScale=%d gOptExportFilename=%p gOptExportEncoder=%d gOptExportQuality=%d\n",
+			fprintf(_df, "DIAG args: loglevel=%p video=%p exe=%p ws=%p keys=%p fps=%p progress=%p gDevice=%p gVideoWidth=%d gVideoHeight=%d gOptExportScale=%d gOptExportFilename=%p gOptExportEncoder=%d gOptExportQuality=%d gOptExportFormat=%d range=%d-%d\n",
 				(void*)loglevelStr, (void*)gVideoFilename, (void*)exePath, (void*)workspacePath,
 				(void*)keysPath, (void*)fpsStr, (void*)progressPath, (void*)gDevice,
 				gVideoWidth, gVideoHeight, gOptExportScale,
-				(void*)gOptExportFilename, gOptExportEncoder, gOptExportQuality);
+				(void*)gOptExportFilename, gOptExportEncoder, gOptExportQuality,
+				gOptExportFormat, rangeIn, rangeOut);
 			fclose(_df);
 		}
 	}
-	sprintf(cmd, "ffmpeg -loglevel %s -i \"%s\" "
+	sprintf(cmd, "ffmpeg -loglevel %s -ss %.3f -i \"%s\" -frames:v %d "
 		"-f rawvideo -pix_fmt rgb24 - | "
 		"\"%s\" \"%s\" --pipe --width %d --height %d",
-		loglevelStr, gVideoFilename,
+		loglevelStr, inSec, gVideoFilename, rangeFrames,
 		exePath, workspacePath,
 		gVideoWidth, gVideoHeight);
 	if (keysPath[0])
@@ -246,21 +266,38 @@ void start_video_export()
 		sprintf(cmd + strlen(cmd), " --dump-scr \"%s\"", dumpScrDir);
 	if (gOptExportDumpPng)
 		sprintf(cmd + strlen(cmd), " --dump-png \"%s\"", dumpPngDir);
+	if (isGif)
+	{
+		// GIF: no audio, palettegen+paletteuse in a single ffmpeg pass
+		sprintf(cmd + strlen(cmd), " | "
+			"ffmpeg -loglevel %s -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -framerate %s -i -"
+			" -progress \"%s\""
+			" -vf \"scale=iw*%d:-1:flags=neighbor,split[s0][s1];[s0]palettegen=max_colors=256[p];[s1][p]paletteuse=dither=bayer\" ",
+			loglevelStr,
+			gDevice->mXRes, gDevice->mYRes,
+			fpsStr,
+			progressPath,
+			gOptExportScale);
+	}
+	else
+	{
 	sprintf(cmd + strlen(cmd), " | "
 		"ffmpeg -loglevel %s -y -sws_flags neighbor -f rawvideo -pix_fmt rgba -s %dx%d -framerate %s -i -"
-		" -i \"%s\""
+		" -ss %.3f -t %.3f -i \"%s\""
 		" -progress \"%s\""
 		" -vf \"scale=iw*%d:-1:flags=neighbor\" "
-		// Single-pass audio: source as 2nd input, video from pipe (0:v),
-		// audio optional (1:a:0?) so no pre-probe is needed; -shortest ends
-		// the output with the shorter stream (same file, ~equal lengths).
+		// Single-pass audio: source as 2nd input (cut to the same range),
+		// video from pipe (0:v), audio optional (1:a:0?) so no pre-probe
+		// is needed; -shortest ends the output with the shorter stream.
 		"-map 0:v:0 -map 1:a:0? -c:a aac -shortest ",
 		loglevelStr,
 		gDevice->mXRes, gDevice->mYRes,
 		fpsStr,
+		inSec, rangeSecs,
 		gVideoFilename,
 		progressPath,
 		gOptExportScale);
+	}
 	gLastExportCheckpoint = 52;
 	cmd[sizeof(cmd) - 1] = '\0';
 	gLastExportCheckpoint = 53;
@@ -273,15 +310,23 @@ void start_video_export()
 	}
 	gLastExportCheckpoint = 54;
 
-	// Encoder-specific args
-	switch (gOptExportEncoder)
+	// Encoder-specific args (mp4/mkv only; GIF uses palette filter above)
+	if (isGif)
+	{
+		size_t clen = strlen(cmd);
+		_snprintf(cmd + clen, sizeof(cmd) - clen - 1,
+			"\"%s\"",
+			exportAbsPath);
+	}
+	else switch (gOptExportEncoder)
 	{
 		case 0: // NVIDIA NVENC
 		{
 			size_t clen = strlen(cmd);
 			_snprintf(cmd + clen, sizeof(cmd) - clen - 1,
 				"-c:v hevc_nvenc -profile:v main -pix_fmt yuv420p "
-				"-preset fast -movflags +faststart -rc constqp -qp %d \"%s\"",
+				"-preset fast%s -rc constqp -qp %d \"%s\"",
+				(gOptExportFormat == 0) ? " -movflags +faststart" : "",
 				gOptExportQuality, exportAbsPath);
 		}
 		break;
@@ -396,23 +441,26 @@ void poll_video_export()
 				char *t = strstr(line, "out_time=");
 				if (t)
 				{
+					// Progress denominator: export range duration (set at start),
+					// falls back to full video duration.
+					double denom = (gExportRangeSecs > 0.0) ? gExportRangeSecs : gVideoDuration;
 					int h, m;
 					double s;
 					if (sscanf(t, "out_time=%d:%d:%lf", &h, &m, &s) >= 3)
 					{
 						double secs = h * 3600.0 + m * 60.0 + s;
-						if (gVideoDuration > 0.0)
+						if (denom > 0.0)
 						{
-							float p = (float)(secs / gVideoDuration);
+							float p = (float)(secs / denom);
 							if (p > 1.0f) p = 1.0f;
 							gVideoExportProgress = p;
 						}
 					}
 					else if (sscanf(t, "out_time=%lf", &s) >= 1)
 					{
-						if (gVideoDuration > 0.0)
+						if (denom > 0.0)
 						{
-							float p = (float)(s / gVideoDuration);
+							float p = (float)(s / denom);
 							if (p > 1.0f) p = 1.0f;
 							gVideoExportProgress = p;
 						}

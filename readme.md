@@ -1,4 +1,4 @@
-# Image Spectrumizer 5.7
+# Image Spectrumizer 5.8
 
 ![Screenshot](img2spec2.jpg)
 
@@ -49,12 +49,13 @@ PNG, raw binary SCR (`.scr`), C header (`.h`), assembler include (`.inc`)
 ### Video Mode
 
 - Load video files (MP4, MOV, AVI, etc.) via ffmpeg
-- Timeline slider with frame-by-frame navigation
+- Double-height timeline slider with frame-by-frame navigation
 - Play/pause with forward/backward skip buttons
 - All modifiers apply to every frame in real time
-- GUI export on Windows with NVIDIA NVENC (HEVC), AMD AMF (HEVC), or software x264 (H.264)
-- Configurable quality (CRF/QP) and scale multiplier (1x-32x)
-- Audio muxed from source during encoding (single pass, AAC)
+- Export via File → Export video... (Windows GUI): mp4 / mkv with NVIDIA NVENC (HEVC), AMD AMF (HEVC), or software x264 (H.264); gif via palettegen+paletteuse (no audio)
+- Configurable quality (CRF/QP, mp4/mkv) and scale multiplier (1x-32x)
+- Export range: In/Out markers with RMB-drag on the timeline (LMB keeps scrubbing), sliders + exact frame fields in the Export window; off-range timeline parts are dimmed
+- Audio muxed from source during encoding (single pass, AAC; cut to the export range)
 
 GUI export, progress, and cancellation are currently implemented only on Windows. On macOS, use the [Terminal video pipeline](#macos); the GUI's **Start export** button does not start an export.
 
@@ -105,6 +106,9 @@ ffmpeg (decode) -> img2spec_video --pipe (process) -> ffmpeg (encode + scale)
   override with `-r` in Extra ffmpeg params
 - Windows GUI export muxes source audio during encoding (source as 2nd ffmpeg input,
   optional `-map 1:a:0?`, `-c:a aac`, `-shortest`); no post-pass remux, same as the macOS example
+- Partial export: decoder seeks with `-ss` + `-frames:v`, audio input is cut with `-ss`/`-t`,
+  `-progress` is measured against the range duration (not the full video)
+- Default export filename: `<input>_spmz.<mp4|mkv|gif>` (extension follows the format)
 - Video loading requires both ffmpeg and ffprobe in PATH; on Windows they can also be placed in the program folder
 - Export window checkboxes **Save per-frame device dump to temp/scr** and **Save per-frame .png to temp/png**
   store every processed frame as `temp/scr/frameNNNNNN.<ext>` / `temp/png/frameNNNNNN.png`
