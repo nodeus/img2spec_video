@@ -5,6 +5,9 @@
 
 static int gExportRunning = 0;
 static double gExportRangeSecs = 0.0;  // progress denominator (range duration)
+static int gExportRangeFrames = 0;     // decode progress denominator (range frames)
+static long gDecodeLogPos = 0;         // incremental read pos in decode -progress file
+static Uint32 gExportStartTicks = 0;   // SDL_GetTicks() at export start (for ETA)
 
 #ifdef _WIN32
 #include <windows.h>
@@ -41,11 +44,13 @@ static void export_delete_dir_files(const char *dir)
 	RemoveDirectoryA(dir);
 }
 
-// Remove the 5 service files plus per-frame dumps (temp/scr, temp/png).
+// Remove the 6 service files plus per-frame dumps (temp/scr, temp/png).
 static void export_cleanup_temp_files()
 {
 	char delPath[MAX_PATH + 32];
 	_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_progress.txt", gStartupCwd);
+	DeleteFileA(delPath);
+	_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_decode_progress.txt", gStartupCwd);
 	DeleteFileA(delPath);
 	_snprintf(delPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export.bat", gStartupCwd);
 	DeleteFileA(delPath);
@@ -120,6 +125,9 @@ void start_video_export()
 	if (rangeFrames < 1) rangeFrames = 1;
 	double rangeSecs = (gVideoFps > 0.0) ? (double)rangeFrames / gVideoFps : 0.0;
 	gExportRangeSecs = rangeSecs;
+	gExportRangeFrames = rangeFrames;
+	gExportStartTicks = SDL_GetTicks();
+	gDecodeLogPos = 0;
 	double inSec = (gVideoFps > 0.0) ? (double)rangeIn / gVideoFps : 0.0;
 	bool isGif = (gOptExportFormat == 2);
 #ifndef _WIN32
@@ -197,6 +205,14 @@ void start_video_export()
 	FILE *pf = fopen(progressPath, "w");
 	if (pf) fclose(pf);
 
+	// Decode-side progress: frame= lines, works at any loglevel. This is the
+	// only progress source that moves during GIF export (palettegen buffers
+	// all frames, so the encoder reports nothing until the very end).
+	char decodeProgressPath[MAX_PATH + 32];
+	_snprintf(decodeProgressPath, MAX_PATH + 32, "%s" PATH_SEP "img2spec_export_decode_progress.txt", tempDir);
+	pf = fopen(decodeProgressPath, "w");
+	if (pf) fclose(pf);
+
 	// Save keyframes to temp file for pipe mode if any exist
 	char keysPath[MAX_PATH] = "";
 	if (gKeyframeCount > 0)
@@ -253,9 +269,10 @@ void start_video_export()
 		}
 	}
 	sprintf(cmd, "ffmpeg -loglevel %s -ss %.3f -i \"%s\" -frames:v %d "
-		"-f rawvideo -pix_fmt rgb24 - | "
+		"-progress \"%s\" -f rawvideo -pix_fmt rgb24 - | "
 		"\"%s\" \"%s\" --pipe --width %d --height %d",
 		loglevelStr, inSec, gVideoFilename, rangeFrames,
+		decodeProgressPath,
 		exePath, workspacePath,
 		gVideoWidth, gVideoHeight);
 	if (keysPath[0])
@@ -427,6 +444,40 @@ void poll_video_export()
 	DWORD exitCode = 0;
 	if (GetExitCodeProcess(gExportProc.hProcess, &exitCode) && exitCode == STILL_ACTIVE)
 	{
+		float pDec = -1.0f;
+		// Decode-side progress (frame= lines): the only source that moves
+		// during GIF export, since palettegen buffers all frames and the
+		// encoder reports nothing until the very end.
+		{
+			char decPath[MAX_PATH + 32];
+			_snprintf(decPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_decode_progress.txt", gStartupCwd);
+			FILE *df = fopen(decPath, "r");
+			if (df)
+			{
+				fseek(df, gDecodeLogPos, SEEK_SET);
+				char line[512];
+				int lastFrame = -1;
+				while (fgets(line, sizeof(line), df))
+				{
+					char *t = strstr(line, "frame=");
+					if (t)
+					{
+						int fr = -1;
+						if (sscanf(t, "frame=%d", &fr) == 1 && fr > lastFrame)
+							lastFrame = fr;
+					}
+				}
+				long newPos = ftell(df);
+				if (newPos >= 0) gDecodeLogPos = newPos;
+				fclose(df);
+				if (lastFrame >= 0 && gExportRangeFrames > 0)
+				{
+					pDec = (float)lastFrame / (float)gExportRangeFrames;
+					if (pDec > 1.0f) pDec = 1.0f;
+				}
+			}
+		}
+
 		// Read ffmpeg -progress file to extract real progress
 		char progPath[MAX_PATH + 32];
 		_snprintf(progPath, MAX_PATH + 32, "%s" PATH_SEP "temp" PATH_SEP "img2spec_export_progress.txt", gStartupCwd);
@@ -453,6 +504,7 @@ void poll_video_export()
 						{
 							float p = (float)(secs / denom);
 							if (p > 1.0f) p = 1.0f;
+							if (pDec >= 0.0f && pDec > p) p = pDec;
 							gVideoExportProgress = p;
 						}
 					}
@@ -462,6 +514,7 @@ void poll_video_export()
 						{
 							float p = (float)(s / denom);
 							if (p > 1.0f) p = 1.0f;
+							if (pDec >= 0.0f && pDec > p) p = pDec;
 							gVideoExportProgress = p;
 						}
 					}
@@ -471,6 +524,10 @@ void poll_video_export()
 			if (newPos >= 0) gExportLogPos = newPos;
 			fclose(pf);
 		}
+		// Encode file may not exist yet (GIF: nothing encoded until decode
+		// ends) — decode progress alone still moves the bar.
+		if (pDec >= 0.0f && pDec > gVideoExportProgress)
+			gVideoExportProgress = pDec;
 	}
 	else
 	{

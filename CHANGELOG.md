@@ -1,5 +1,18 @@
 # Changelog
 
+## 5.9 — GIF Export Progress & ETA
+
+### Bug Fixes
+
+- **GIF export progress was frozen at 0%** — progress was read only from the encoding ffmpeg (`out_time=`), but `palettegen` buffers all frames before emitting the palette, so the encoder reports nothing until the very end (confirmed: decode at 621/900 frames with no encode `out_time` at all). The decoding ffmpeg now writes its own `-progress` file (`temp/img2spec_export_decode_progress.txt`, `frame=` lines) and progress is `max(decode frames, encode out_time)` — the bar moves for all formats
+- **Cleanup temporary files** now also removes the decode progress file (6 service files total)
+
+### New Features
+
+- **Export progress bar with elapsed time and ETA** in the Export window (custom `DrawList` bar — vendored ImGui has no `ProgressBar`)
+
+---
+
 ## 5.8 — Export Range, Formats & Timeline Handles
 
 ### New Features

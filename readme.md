@@ -1,4 +1,4 @@
-# Image Spectrumizer 5.8
+# Image Spectrumizer 5.9
 
 ![Screenshot](img2spec2.jpg)
 
@@ -108,13 +108,17 @@ ffmpeg (decode) -> img2spec_video --pipe (process) -> ffmpeg (encode + scale)
   optional `-map 1:a:0?`, `-c:a aac`, `-shortest`); no post-pass remux, same as the macOS example
 - Partial export: decoder seeks with `-ss` + `-frames:v`, audio input is cut with `-ss`/`-t`,
   `-progress` is measured against the range duration (not the full video)
+- Progress is `max(decode frames, encode out_time)`: the decoder writes its own `-progress` file,
+  so the bar also moves during GIF export (where `palettegen` buffers all frames and the encoder
+  reports nothing until the end); the Export window shows a progress bar with elapsed time and ETA
 - Default export filename: `<input>_spmz.<mp4|mkv|gif>` (extension follows the format)
 - Video loading requires both ffmpeg and ffprobe in PATH; on Windows they can also be placed in the program folder
 - Export window checkboxes **Save per-frame device dump to temp/scr** and **Save per-frame .png to temp/png**
   store every processed frame as `temp/scr/frameNNNNNN.<ext>` / `temp/png/frameNNNNNN.png`
   (numbering matches `--keys` frames)
-- **Cleanup temporary files** removes the 5 service files (`img2spec_export.isw`,
-  `img2spec_export_keys.json`, `img2spec_export_progress.txt`, `img2spec_export.bat`,
+- **Cleanup temporary files** removes the 6 service files (`img2spec_export.isw`,
+  `img2spec_export_keys.json`, `img2spec_export_progress.txt`, `img2spec_export_decode_progress.txt`,
+  `img2spec_export.bat`,
   `img2spec_export_stderr.log`) **plus** everything inside `temp/scr` and `temp/png`
   (the directories themselves are removed too); with Cleanup off all of it stays in `temp/`
 
