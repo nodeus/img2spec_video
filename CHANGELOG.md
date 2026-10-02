@@ -1,5 +1,21 @@
 # Changelog
 
+## 5.8 — Export Range, Formats & Timeline Handles
+
+### New Features
+
+- **Export video moved to the File menu** — `File → Export video...` (enabled only with a loaded video); the button is removed from the Image window
+- **Export formats: mp4 / mkv / gif** — format combo in the Export window, filename extension follows the format; mkv uses the same encoders without `+faststart`; gif is encoded in a single pass via `palettegen+paletteuse` (no audio track, encoder/quality hidden)
+- **Export range (In/Out markers)** — export a part of the video: sliders + exact frame number fields + `Set In/Out to current` / `Full range` buttons in the Export window; decoder limited with `-ss` + `-frames:v`, audio input cut with `-ss`/`-t`, progress measured over the range duration
+- **RMB-drag range markers on the timeline** — grab the In (green) / Out (blue) triangle with the right mouse button and drag it, preview follows the marker; LMB keeps scrubbing the current frame everywhere
+- **Double-height timeline** with range edge guide lines; timeline parts outside the export range are dimmed
+
+### Notes
+
+- Keyframes outside the export range do not apply to a partial export (pipe frames are numbered from the range start)
+
+---
+
 ## 5.7 — Per-Frame Dumps, Single-Pass Audio & fps Fix
 
 ### New Features
